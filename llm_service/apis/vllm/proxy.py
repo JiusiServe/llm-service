@@ -382,6 +382,10 @@ class Proxy(EngineClient):
                     continue
                 resp_type, payload = await socket.recv_multipart()
 
+                # Decode response according to its type.
+                resp: Union[
+                    GenerationResponse, HeartbeatResponse, FailureResponse
+                ]
                 if resp_type in (ResponseType.GENERATION, ResponseType.ENCODE):
                     resp = decoder.decode(payload)
                 elif resp_type == ResponseType.HEARTBEAT:
@@ -390,7 +394,7 @@ class Proxy(EngineClient):
                     resp = failure_decoder.decode(payload)
                 else:
                     raise RuntimeError(
-                        f"Unknown response type from worker: {resp_type}"
+                        f"Unknown response type from worker: {resp_type.decode()}"
                     )
 
                 if resp.request_id not in self.queues:

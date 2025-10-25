@@ -7,6 +7,7 @@ from typing import Any
 
 import msgspec
 import numpy as np
+from numpy.typing import NDArray
 import zmq
 import zmq.asyncio
 
@@ -71,18 +72,18 @@ class DisaggWorker:
 
     async def _handle_request(self, req_type: bytes, req_data: bytes):
         if req_type == RequestType.ENCODE:
-            req = self.decoder_generate.decode(req_data)
-            req.sampling_params.max_tokens = 1
-            await self._encode_handler(req)
+            gen_req = self.decoder_generate.decode(req_data)
+            gen_req.sampling_params.max_tokens = 1
+            await self._encode_handler(gen_req)
         elif req_type == RequestType.GENERATION:
-            req = self.decoder_generate.decode(req_data)
-            await self._generation_handler(req)
+            gen_req = self.decoder_generate.decode(req_data)
+            await self._generation_handler(gen_req)
         elif req_type == RequestType.ABORT:
-            req = self.decoder_abort.decode(req_data)
-            await self._abort_handler(req)
+            gen_req = self.decoder_abort.decode(req_data)
+            await self._abort_handler(gen_req)
         elif req_type == RequestType.HEARTBEAT:
-            req = self.decoder_heartbeat.decode(req_data)
-            await self._heartbeat_handler(req)
+            hb_req = self.decoder_heartbeat.decode(req_data)
+            await self._heartbeat_handler(hb_req)
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
@@ -142,10 +143,10 @@ class DisaggWorker:
                 await self.to_proxy.send_multipart(msg, copy=False)
         except Exception as e:
             logger.exception("Generation failed for request %s", request_id)
-            response = FailureResponse(
+            failure_resp = FailureResponse(
                 request_id=request_id, error_message=str(e) or type(e).__name__
             )
-            response_bytes = self.encoder.encode(response)
+            response_bytes = self.encoder.encode(failure_resp)
             msg = (ResponseType.FAILURE, response_bytes)
             await self.to_proxy.send_multipart(msg, copy=False)
 
@@ -154,7 +155,7 @@ def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:
     images = mm_data.get("image", [])
     if not isinstance(images, list):
         images = [images]
-    decoded_images = []
+    decoded_images: list[NDArray[Any]] | NDArray[Any] = []
     for img in images:
         if img["type"] == "ndarray":
             decoded_img = np.frombuffer(
