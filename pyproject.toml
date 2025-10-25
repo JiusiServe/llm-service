@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm_service"
+version = "0.1.0"
+description = "Disaggregated vLLM service components"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "llm-service maintainers" }]
+dependencies = [
+    "msgspec>=0.18",
+    "numpy>=1.24",
+    "pyzmq>=25.0",
+    "regex>=2024.5",
+    "uvloop>=0.19; platform_system != 'Windows'",
+]
+
+[project.optional-dependencies]
+develop = [
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "types-PyYAML",
+    "types-requests",
+    "types-setuptools",
+]
+
+[tool.setuptools.packages.find]
+where = ["llm_service"]

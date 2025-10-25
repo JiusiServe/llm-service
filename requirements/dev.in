@@ -1,0 +1,2 @@
+# Generated through uv's pip-compile hook. Sync with pyproject optional deps.
+-e .[develop]

@@ -1,0 +1,126 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+default_stages:
+  - pre-commit
+  - manual
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+    - id: ruff-check
+      args: [--output-format, github, --fix]
+    - id: ruff-format
+      args: [--output-format, github, --line-length, "80"]
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.38.1
+    hooks:
+      - id: typos
+        args: [--force-exclude]
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.44.0
+    hooks:
+      - id: markdownlint
+        stages: [manual]
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+        stages: [manual]
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.9.1
+    hooks:
+      - id: pip-compile
+        args: [requirements/dev.in, -o, requirements/dev.txt]
+        stages: [manual]
+        files: ^requirements/dev\.(in|txt)$
+  - repo: local
+    hooks:
+      - id: png-lint
+        name: Lint Excalidraw PNG exports
+        entry: tools/png-lint.sh
+        language: script
+        types: [png]
+      - id: enforce-import-regex-instead-of-re
+        name: Enforce regex usage
+        entry: python tools/enforce_regex_import.py
+        language: python
+        types: [python]
+        pass_filenames: false
+        additional_dependencies: [regex]
+      - id: check-spdx-header
+        name: Check SPDX headers
+        entry: python tools/check_spdx_header.py
+        language: python
+        types: [python]
+      - id: mypy-local
+        name: Run mypy locally (native python)
+        entry: python tools/pre_commit/mypy.py 0 auto
+        language: python
+        types: [python, pyi]
+        always_run: true
+        require_serial: true
+        additional_dependencies:
+          - mypy==1.11.1
+          - regex
+          - types-PyYAML
+          - types-requests
+          - types-setuptools
+      - id: mypy-3.11
+        name: Run mypy for Python 3.11
+        entry: python tools/pre_commit/mypy.py 1 3.11
+        language: python
+        types: [python, pyi]
+        require_serial: true
+        stages: [manual]
+        additional_dependencies:
+          - mypy==1.11.1
+          - regex
+          - types-PyYAML
+          - types-requests
+          - types-setuptools
+      - id: mypy-3.12
+        name: Run mypy for Python 3.12
+        entry: python tools/pre_commit/mypy.py 1 3.12
+        language: python
+        types: [python, pyi]
+        require_serial: true
+        stages: [manual]
+        additional_dependencies:
+          - mypy==1.11.1
+          - regex
+          - types-PyYAML
+          - types-requests
+          - types-setuptools
+      - id: mypy-3.13
+        name: Run mypy for Python 3.13
+        entry: python tools/pre_commit/mypy.py 1 3.13
+        language: python
+        types: [python, pyi]
+        require_serial: true
+        stages: [manual]
+        additional_dependencies:
+          - mypy==1.11.1
+          - regex
+          - types-PyYAML
+          - types-requests
+          - types-setuptools
+      - id: signoff-commit
+        name: Sign-off Commit
+        entry: bash
+        args:
+          - -c
+          - |
+            if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
+              printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+            fi
+        language: system
+        verbose: true
+        stages: [commit-msg]
