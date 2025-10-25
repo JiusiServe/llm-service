@@ -1,10 +1,12 @@
 # Contributing to llm-service
 
-Thank you for your interest in contributing to llm-service! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to llm-service! This document
+provides guidelines and information for contributors.
 
 ## Code of Conduct
 
-By participating in this project, you agree to abide by our Code of Conduct. Please be respectful and professional in all interactions.
+By participating in this project, you agree to abide by our Code of
+Conduct. Please be respectful and professional in all interactions.
 
 ## Getting Started
 
@@ -18,17 +20,20 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 
 1. Fork the repository
 2. Clone your fork:
+
    ```bash
    git clone https://github.com/yourusername/llm-service.git
    cd llm-service
    ```
 
 3. Install dependencies:
+
    ```bash
    uv sync --extra develop
    ```
 
 4. Install pre-commit hooks:
+
    ```bash
    uv run pre-commit install
    ```
@@ -38,6 +43,7 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 ### Making Changes
 
 1. Create a new branch for your feature or bugfix:
+
    ```bash
    git checkout -b feature/your-feature-name
    ```
@@ -45,17 +51,20 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 2. Make your changes following the coding standards below
 
 3. Run tests and linting:
+
    ```bash
    uv run pre-commit run --all-files
    uv run pytest
    ```
 
 4. Commit your changes with a signed-off commit:
+
    ```bash
    git commit -s -m "Your commit message"
    ```
 
-   The `-s` flag adds a "Signed-off-by" line to your commit, which is required for this project (Developer Certificate of Origin).
+   The `-s` flag adds a "Signed-off-by" line to your commit, which is
+   required for this project (Developer Certificate of Origin).
 
 5. Push to your fork and create a pull request
 
@@ -86,6 +95,7 @@ All tools are configured in `pyproject.toml` and `.pre-commit-config.yaml`.
 - Use descriptive test names and docstrings
 
 Run tests with:
+
 ```bash
 uv run pytest
 ```
@@ -125,15 +135,18 @@ When creating issues:
 
 ## Security
 
-If you discover a security vulnerability, please report it privately through GitHub's security advisory feature rather than creating a public issue.
+If you discover a security vulnerability, please report it privately through
+GitHub's security advisory feature rather than creating a public issue.
 
 ## License
 
-By contributing to this project, you agree that your contributions will be licensed under the same license as the project.
+By contributing to this project, you agree that your contributions will be
+licensed under the same license as the project.
 
 ## Questions?
 
 If you have questions about contributing, feel free to:
+
 - Open a discussion on GitHub
 - Ask in the issue comments
 - Contact the maintainers
