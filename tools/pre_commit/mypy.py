@@ -46,7 +46,14 @@ def run_mypy(ci_mode: bool, python_version: str, targets: list[str]) -> int:
         return 0
 
     resolved_version = resolve_python_version(python_version)
-    args = ["mypy", "--python-version", resolved_version]
+    # Use explicit package bases to avoid duplicate module discovery when
+    # passing directory targets (e.g. "llm_service").
+    args = [
+        "mypy",
+        "--python-version",
+        resolved_version,
+        "--explicit-package-bases",
+    ]
     if ci_mode:
         args += ["--follow-imports", "silent"]
     else:

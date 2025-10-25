@@ -120,11 +120,14 @@ class DisaggWorker:
         request_id = req.request_id
 
         try:
+            prompt_payload: dict[str, Any] = {"prompt": req.prompt}
+            if req.multi_modal_data is not None:
+                prompt_payload["multi_modal_data"] = _decode_mm_data(
+                    req.multi_modal_data
+                )
+
             generator = self.engine.generate(
-                prompt={
-                    "prompt": req.prompt,
-                    "multi_modal_data": _decode_mm_data(req.multi_modal_data),
-                },
+                prompt=prompt_payload,
                 sampling_params=req.sampling_params,
                 request_id=request_id,
             )
