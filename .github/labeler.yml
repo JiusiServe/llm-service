@@ -1,0 +1,64 @@
+# Labeler configuration
+# See: https://github.com/actions/labeler
+
+# Core service files
+"core":
+  - llm_service/*.py
+  - llm_service/entrypoints/**
+
+# API and proxy related
+"api":
+  - llm_service/apis/**
+  - "**/*proxy*"
+
+# vLLM integration
+"vllm":
+  - llm_service/apis/vllm/**
+  - llm_service/workers/vllm/**
+  - "**/*vllm*"
+
+# Worker processes
+"workers":
+  - llm_service/workers/**
+  - llm_service/entrypoints/worker.py
+
+# Protocol related
+"protocol":
+  - llm_service/protocol/**
+
+# Documentation
+"documentation":
+  - "**/*.md"
+  - "**/*.rst"
+  - docs/**
+
+# Tests
+"tests":
+  - tests/**
+  - "**/*test*.py"
+  - "**/test_*"
+
+# CI/CD and tooling
+"ci":
+  - .github/**
+  - .pre-commit-config.yaml
+  - pyproject.toml
+  - requirements/**
+
+# Dependencies
+"dependencies":
+  - requirements/**
+  - pyproject.toml
+  - setup.py
+
+# Tools and utilities
+"tools":
+  - tools/**
+
+# Configuration
+"config":
+  - "**/*.yaml"
+  - "**/*.yml"
+  - "**/*.toml"
+  - "**/*.ini"
+  - "**/*.cfg"

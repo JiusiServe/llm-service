@@ -1,0 +1,50 @@
+# Auto-assign configuration
+# See: https://github.com/kentaro-m/auto-assign-action
+
+# Set to true to add reviewers to pull requests
+addReviewers: true
+
+# Set to true to add assignees to pull requests
+addAssignees: false
+
+# Number of reviewers to add
+numberOfReviewers: 1
+
+# A list of reviewers to be added to pull requests (GitHub user name)
+reviewers:
+  - wuhang2014  # Repository owner
+  # Add more reviewers as your team grows:
+  # - reviewer2
+  # - reviewer3
+
+# A number of assignees to add to the pull request
+numberOfAssignees: 0
+
+# A list of assignees to be added to pull requests (GitHub user name)
+assignees: []
+
+# A list of keywords to be skipped the process that add reviewers if pull requests include it
+skipKeywords:
+  - wip
+  - WIP
+  - draft
+  - Draft
+  - "[WIP]"
+  - "[DRAFT]"
+
+# Include draft pull requests
+includeDraftPR: false
+
+# Assign reviewers based on file paths
+# reviewGroups:
+#   core:
+#     reviewers:
+#       - wuhang2014
+#     paths:
+#       - "llm_service/**"
+#   
+#   api:
+#     reviewers:
+#       - api-reviewer
+#     paths:
+#       - "llm_service/apis/**"

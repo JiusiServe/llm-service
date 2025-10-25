@@ -1,0 +1,78 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly on Sundays at 12:00 UTC
+    - cron: '0 12 * * 0'
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+    
+    - name: Install dependencies
+      run: |
+        uv sync --extra develop
+    
+    - name: Install security tools
+      run: |
+        uv pip install safety bandit[toml] semgrep
+    
+    - name: Run safety check
+      run: |
+        uv run safety check --json --output safety-report.json || true
+        echo "Safety scan completed"
+    
+    - name: Run bandit security linter
+      run: |
+        uv run bandit -r llm_service/ -f json -o bandit-report.json || true
+        echo "Bandit scan completed"
+        
+    - name: Run semgrep
+      run: |
+        uv run semgrep --config=auto --json --output=semgrep-report.json llm_service/ || true
+        echo "Semgrep scan completed"
+    
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-reports-${{ github.sha }}
+        path: |
+          safety-report.json
+          bandit-report.json
+          semgrep-report.json
+        retention-days: 30
+
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Dependency Review
+      uses: actions/dependency-review-action@v4
+      with:
+        fail-on-severity: moderate
+        allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, GPL-3.0, LGPL-3.0

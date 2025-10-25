@@ -1,0 +1,22 @@
+name: Update README Badges
+
+on:
+  workflow_run:
+    workflows: ["CI", "Security", "CodeQL"]
+    types:
+      - completed
+
+jobs:
+  update-badges:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Update README with workflow status
+      run: |
+        echo "Workflow ${{ github.event.workflow_run.name }} completed with status: ${{ github.event.workflow_run.conclusion }}"
+        # Add logic here to update README.md with badges if needed

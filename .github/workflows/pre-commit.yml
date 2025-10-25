@@ -1,0 +1,44 @@
+name: Pre-commit
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+    
+    - name: Install dependencies
+      run: |
+        uv sync --extra develop
+    
+    - name: Cache pre-commit
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pre-commit
+        key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+        restore-keys: |
+          pre-commit-${{ runner.os }}-
+    
+    - name: Run pre-commit on changed files
+      run: |
+        uv run pre-commit run --from-ref origin/main --to-ref HEAD --show-diff-on-failure
+    
+    - name: Run manual stage hooks
+      run: |
+        uv run pre-commit run --hook-stage manual --all-files
