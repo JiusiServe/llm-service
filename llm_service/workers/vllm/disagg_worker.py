@@ -155,13 +155,16 @@ def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:
     images = mm_data.get("image", [])
     if not isinstance(images, list):
         images = [images]
-    decoded_images: list[NDArray[Any]] | NDArray[Any] = []
+    decoded_list: list[NDArray[Any]] = []
     for img in images:
         if img["type"] == "ndarray":
             decoded_img = np.frombuffer(
                 bytes(img["data"]), dtype=img["dtype"]
             ).reshape(img["shape"])
-            decoded_images.append(decoded_img)
-    if len(decoded_images) == 1:
-        decoded_images = decoded_images[0]
-    return {"image": decoded_images}
+            decoded_list.append(decoded_img)
+    result_images: list[NDArray[Any]] | NDArray[Any]
+    if len(decoded_list) == 1:
+        result_images = decoded_list[0]
+    else:
+        result_images = decoded_list
+    return {"image": result_images}
