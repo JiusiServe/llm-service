@@ -17,6 +17,8 @@ from llm_service.protocol.protocol import (
     GenerationResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    ProfileRequest,
+    ProfileResponse,
     RequestType,
     ResponseType,
 )
@@ -46,6 +48,7 @@ class DisaggWorker:
         self.decoder_generate = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
+        self.decoder_profile = msgspec.msgpack.Decoder(ProfileRequest)
         self.encoder = msgspec.msgpack.Encoder()
 
         self.running_requests: set[asyncio.Task] = set()
@@ -84,6 +87,12 @@ class DisaggWorker:
         elif req_type == RequestType.HEARTBEAT:
             hb_req = self.decoder_heartbeat.decode(req_data)
             await self._heartbeat_handler(hb_req)
+        elif req_type == RequestType.START_PROFILE:
+            profile_req = self.decoder_profile.decode(req_data)
+            await self._start_profile_handler(profile_req)
+        elif req_type == RequestType.STOP_PROFILE:
+            profile_req = self.decoder_profile.decode(req_data)
+            await self._stop_profile_handler(profile_req)
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
@@ -112,6 +121,38 @@ class DisaggWorker:
             ),
         )
         await self.to_proxy.send_multipart(msg, copy=False)
+
+    async def _start_profile_handler(self, req: ProfileRequest):
+        """Handle start profiling request by delegating to the engine."""
+        try:
+            await self.engine.start_profile()
+            logger.info("Profiling started for request %s", req.request_id)
+        except Exception as e:
+            logger.exception("Failed to start profiling for request %s", req.request_id)
+            # Send failure response back to proxy
+            failure_resp = FailureResponse(
+                request_id=req.request_id, 
+                error_message=f"Failed to start profiling: {str(e)}"
+            )
+            response_bytes = self.encoder.encode(failure_resp)
+            msg = (ResponseType.FAILURE, response_bytes)
+            await self.to_proxy.send_multipart(msg, copy=False)
+
+    async def _stop_profile_handler(self, req: ProfileRequest):
+        """Handle stop profiling request by delegating to the engine."""
+        try:
+            await self.engine.stop_profile()
+            logger.info("Profiling stopped for request %s", req.request_id)
+        except Exception as e:
+            logger.exception("Failed to stop profiling for request %s", req.request_id)
+            # Send failure response back to proxy
+            failure_resp = FailureResponse(
+                request_id=req.request_id,
+                error_message=f"Failed to stop profiling: {str(e)}"
+            )
+            response_bytes = self.encoder.encode(failure_resp)
+            msg = (ResponseType.FAILURE, response_bytes)
+            await self.to_proxy.send_multipart(msg, copy=False)
 
     async def _generate(
         self,

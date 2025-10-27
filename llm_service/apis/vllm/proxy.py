@@ -20,6 +20,8 @@ from llm_service.protocol.protocol import (
     GenerationResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    ProfileRequest,
+    ProfileResponse,
     RequestType,
     ResponseType,
     ServerType,
@@ -492,10 +494,46 @@ class Proxy(EngineClient):
             self.queues.pop(request_id, None)
 
     async def start_profile(self) -> None:
-        raise NotImplementedError
+        """Send start profile request to all PD workers."""
+        if not self.to_pd_sockets:
+            raise RuntimeError(
+                "No PD workers configured: pd_addr_list is empty."
+            )
+        
+        # Send START_PROFILE request to all PD workers
+        request_id = uuid.uuid4().hex
+        request = ProfileRequest(request_id=request_id)
+        
+        try:
+            payload = self.encoder.encode(request)
+            msg = (RequestType.START_PROFILE, payload)
+            
+            # Send to all PD workers
+            for socket in self.to_pd_sockets:
+                await socket.send_multipart(msg, copy=False)
+        except Exception as e:
+            raise RuntimeError(f"Failed to start profiling: {e}") from e
 
     async def stop_profile(self) -> None:
-        raise NotImplementedError
+        """Send stop profile request to all PD workers."""
+        if not self.to_pd_sockets:
+            raise RuntimeError(
+                "No PD workers configured: pd_addr_list is empty."
+            )
+        
+        # Send STOP_PROFILE request to all PD workers
+        request_id = uuid.uuid4().hex
+        request = ProfileRequest(request_id=request_id)
+        
+        try:
+            payload = self.encoder.encode(request)
+            msg = (RequestType.STOP_PROFILE, payload)
+            
+            # Send to all PD workers
+            for socket in self.to_pd_sockets:
+                await socket.send_multipart(msg, copy=False)
+        except Exception as e:
+            raise RuntimeError(f"Failed to stop profiling: {e}") from e
 
     async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         raise NotImplementedError
