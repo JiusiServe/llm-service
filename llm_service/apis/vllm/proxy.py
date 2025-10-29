@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import time
 import uuid
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Optional, Union
@@ -20,13 +21,15 @@ from llm_service.protocol.protocol import (
     GenerationResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    MetricsRequest,
+    MetricsResponse,
     RequestType,
     ResponseType,
     ServerType,
 )
 from llm_service.request_stats import RequestStatsMonitor
 from llm_service.routing_logic import RandomRouter, RoutingInterface
-from llm_service.service_discovery import HealthCheckServiceDiscovery
+from llm_service.service_discovery import HealthCheckServiceDiscovery, MetricsServiceDiscovery
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.data import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -40,6 +43,9 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.utils import Device
 from vllm.v1.outputs import SamplerOutput
+
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
+                              "0") in ("1", "true", "True")
 
 logger = init_logger(__name__)
 
@@ -99,6 +105,16 @@ class Proxy(EngineClient):
             health_threshold=self.health_threshold,
             health_check_func=self.check_health,
         )
+        self.pd_metrics_logger = MetricsServiceDiscovery(
+            server_type=ServerType.PD_INSTANCE,
+            instances=list(range(len(self.pd_addr_list))),
+            get_metrics_func=self.get_metrics
+        )
+        self.encoder_metrics_logger = MetricsServiceDiscovery(
+            server_type=ServerType.E_INSTANCE,
+            instances=list(range(len(self.encode_addr_list))),
+            get_metrics_func=self.get_metrics
+        )
         self.encode_request_stats_monitor = RequestStatsMonitor(
             list(range(len(self.encode_addr_list)))
         )
@@ -137,6 +153,11 @@ class Proxy(EngineClient):
             )
         )
 
+        self.proxy_to_pd_time_start: dict[str, float] = {}
+        self.proxy_to_encode_time_start: dict[str, float] = {}
+        self.proxy_to_pd_time: dict[str, float] = {}
+        self.proxy_to_encode_time: dict[str, float] = {}
+
     def shutdown(self):
         self.ctx.destroy()
         if (task := self.output_handler) is not None:
@@ -174,8 +195,17 @@ class Proxy(EngineClient):
         )
         try:
             socket = self.to_encode_sockets[idx]
+            if TIMECOUNT_ENABLED:
+                self.proxy_to_encode_time_start[request.request_id] = \
+                    time.perf_counter()
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
+            if TIMECOUNT_ENABLED and isinstance(response, GenerationResponse) \
+                and response.proxy_to_worker_time_end:
+                self.proxy_to_pd_time[request.request_id] = \
+                    self.proxy_to_encode_time_start[request.request_id] - \
+                        response.proxy_to_worker_time_end
+
             if isinstance(response, Exception):
                 raise response
         finally:
@@ -212,7 +242,16 @@ class Proxy(EngineClient):
 
         try:
             socket = self.to_pd_sockets[idx]
+            if TIMECOUNT_ENABLED:
+                self.proxy_to_pd_time_start[request.request_id] = \
+                    time.perf_counter()
             await socket.send_multipart(msg, copy=False)
+            response = await q.get()
+            if TIMECOUNT_ENABLED and isinstance(response, GenerationResponse) \
+                and response.proxy_to_worker_time_end:
+                self.proxy_to_pd_time[request.request_id] = \
+                    self.proxy_to_pd_time_start[request.request_id] - \
+                        response.proxy_to_worker_time_end
             finished = False
             while not finished:
                 response = await q.get()
@@ -345,6 +384,7 @@ class Proxy(EngineClient):
         decoder = msgspec.msgpack.Decoder(GenerationResponse)
         failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
+        metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
         try:
             socket = self.ctx.socket(zmq.constants.PULL)
             socket.bind(self.proxy_addr)
@@ -392,6 +432,8 @@ class Proxy(EngineClient):
                     resp = heartbeat_decoder.decode(payload)
                 elif resp_type == ResponseType.FAILURE:
                     resp = failure_decoder.decode(payload)
+                elif resp_type == ResponseType.METRICS:
+                    resp = metrics_decoder.decode(payload)
                 else:
                     raise RuntimeError(
                         f"Unknown response type from worker: {resp_type.decode()}"
@@ -488,6 +530,36 @@ class Proxy(EngineClient):
             raise RuntimeError(
                 f"Health check failed for {server_type} {id}, exception: {e}"
             ) from e
+        finally:
+            self.queues.pop(request_id, None)
+    
+    async def get_metrics(self, server_type: ServerType, id: int):
+        request_id = str(uuid.uuid4())
+        request = MetricsRequest(request_id=request_id)
+        q: asyncio.Queue = asyncio.Queue()
+        self.queues[request_id] = q
+        try:
+            payload = self.encoder.encode(request)
+            msg = (RequestType.METRICS, payload)
+            if server_type == ServerType.PD_INSTANCE:
+                socket = self.to_pd_sockets[id]
+            else:
+                socket = self.to_encode_sockets[id]
+
+            await socket.send_multipart(msg, copy=False)
+            response = await q.get()
+            # calculate proxy to pd/encode time
+            if isinstance(response,
+                          MetricsResponse) and response.metrics is not None:
+                return response.metrics
+            elif isinstance(response, Exception):
+                raise response
+            else:
+                return None
+
+        except Exception as e:
+            raise RuntimeError("Get metrics failed for %s %s, exception: %s",
+                               server_type, id, e) from e
         finally:
             self.queues.pop(request_id, None)
 

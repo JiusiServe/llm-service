@@ -3,7 +3,9 @@
 
 import asyncio
 import os
+import time
 from typing import Any
+from vllm.v1.metrics.loggers import EPDStatsLogger
 
 import msgspec
 import numpy as np
@@ -17,11 +19,17 @@ from llm_service.protocol.protocol import (
     GenerationResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    MetricsRequest,
+    MetricsResponse,
     RequestType,
     ResponseType,
 )
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+import vllm.envs as envs
+
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
+                              "0") in ("1", "true", "True")
 
 logger = init_logger(__name__)
 
@@ -34,7 +42,6 @@ class DisaggWorker:
         proxy_addr: str,
     ):
         self.engine = engine
-
         self.worker_addr = f"ipc://{address}"
         self.proxy_addr = f"ipc://{proxy_addr}"
         self.ctx = zmq.asyncio.Context()
@@ -46,6 +53,7 @@ class DisaggWorker:
         self.decoder_generate = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
+        self.decoder_metrics = msgspec.msgpack.Decoder(MetricsRequest)
         self.encoder = msgspec.msgpack.Encoder()
 
         self.running_requests: set[asyncio.Task] = set()
@@ -60,12 +68,21 @@ class DisaggWorker:
         if os.path.exists(socket_path):
             os.remove(socket_path)
 
+    async def _do_log_stats(self) -> None:
+        while True:
+            # log engine stats(logger stats and EPD stats (if enabled))
+            await self.engine.do_log_stats()
+            await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+
     async def run_busy_loop(self):
         logger.info("DisaggWorker is ready To handle requests.")
 
         poller = zmq.asyncio.Poller()
         poller.register(self.from_proxy, zmq.POLLIN)
-
+        if TIMECOUNT_ENABLED:
+            task = asyncio.create_task(self._do_log_stats())
+            self.running_requests.add(task)
+            task.add_done_callback(self.running_requests.discard)
         while True:
             req_type, req_data = await self.from_proxy.recv_multipart()
             await self._handle_request(req_type, req_data)
@@ -84,19 +101,22 @@ class DisaggWorker:
         elif req_type == RequestType.HEARTBEAT:
             hb_req = self.decoder_heartbeat.decode(req_data)
             await self._heartbeat_handler(hb_req)
+        elif req_type == RequestType.METRICS:
+            req = self.decoder_metrics.decode(req_data)
+            await self._metrics_handler(req)
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
     async def _encode_handler(self, req: GenerationRequest):
         task = asyncio.create_task(
-            self._generate(req, lambda b: (ResponseType.ENCODE, b))
+            self._generate(req, MsgFunc(ResponseType.ENCODE))
         )
         self.running_requests.add(task)
         task.add_done_callback(self.running_requests.discard)
 
     async def _generation_handler(self, req: GenerationRequest):
         task = asyncio.create_task(
-            self._generate(req, lambda b: (ResponseType.GENERATION, b))
+            self._generate(req, MsgFunc(ResponseType.GENERATION))
         )
         self.running_requests.add(task)
         task.add_done_callback(self.running_requests.discard)
@@ -113,13 +133,21 @@ class DisaggWorker:
         )
         await self.to_proxy.send_multipart(msg, copy=False)
 
+    async def _metrics_handler(self, req: MetricsRequest):
+        stats_logger: dict[int, dict[str, Any]] = await self.engine.get_epd_stats()
+        msg = (ResponseType.METRICS,
+                self.encoder.encode(
+                    MetricsResponse(request_id=req.request_id,
+                                    metrics=stats_logger)))
+        await self.to_proxy.send_multipart(msg, copy=False)
+
     async def _generate(
         self,
         req: GenerationRequest,
         make_msg_func,
     ):
         request_id = req.request_id
-
+        _recv_time = time.perf_counter() # time of worker receive request from proxy
         try:
             prompt_payload: dict[str, Any] = {"prompt": req.prompt}
             if req.multi_modal_data is not None:
@@ -137,7 +165,13 @@ class DisaggWorker:
                 response = GenerationResponse.from_request_output(
                     request_output
                 )
-
+                if TIMECOUNT_ENABLED:
+                    if make_msg_func.msg_type == ResponseType.ENCODE and \
+                        not response.proxy_to_worker_time_end:
+                        response.proxy_to_worker_time_end = _recv_time
+                    elif make_msg_func.msg_type == ResponseType.GENERATION and \
+                        not response.proxy_to_worker_time_end:
+                        response.proxy_to_worker_time_end = _recv_time
                 response_bytes = self.encoder.encode(response)
                 msg = make_msg_func(response_bytes)
                 await self.to_proxy.send_multipart(msg, copy=False)
@@ -149,6 +183,13 @@ class DisaggWorker:
             response_bytes = self.encoder.encode(failure_resp)
             msg = (ResponseType.FAILURE, response_bytes)
             await self.to_proxy.send_multipart(msg, copy=False)
+
+
+class MsgFunc:
+    def __init__(self, msg_type):
+        self.msg_type = msg_type
+    def __call__(self, b):
+        return (self.msg_type, b)
 
 
 def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:

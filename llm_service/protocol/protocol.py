@@ -25,6 +25,7 @@ class RequestType:
     ABORT = b"\x01"
     ENCODE = b"\x02"
     HEARTBEAT = b"\x03"
+    METRICS = b"\x04"
 
 
 class PDAbortRequest(msgspec.Struct):
@@ -36,6 +37,7 @@ class ResponseType:
     FAILURE = b"\x01"
     ENCODE = b"\x02"
     HEARTBEAT = b"\x03"
+    METRICS = b"\x04"
 
 
 class GenerationResponse(msgspec.Struct):
@@ -47,6 +49,7 @@ class GenerationResponse(msgspec.Struct):
     stop_reason: Optional[str] = None
     # TODO: support full protocol.
     logprobs = None
+    proxy_to_worker_time_end: Optional[float] = 0.0
 
     @classmethod
     def from_request_output(
@@ -83,3 +86,12 @@ class HeartbeatResponse(msgspec.Struct):
 class FailureResponse(msgspec.Struct):
     request_id: str
     error_message: str
+
+
+class MetricsRequest(msgspec.Struct):
+    request_id: str
+
+
+class MetricsResponse(msgspec.Struct):
+    request_id: str
+    metrics: dict[str, float]

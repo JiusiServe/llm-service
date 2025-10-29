@@ -77,6 +77,9 @@ async def main():
             for i in range(10)
         ]
         await asyncio.gather(*tasks)
+
+        logger.info(await p.pd_metrics_logger.get_metrics())
+        logger.info(await p.encoder_metrics_logger.get_metrics())
     finally:
         p.shutdown()
 

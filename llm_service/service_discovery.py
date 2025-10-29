@@ -148,3 +148,59 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
         self._cached_unhealth_instances = [
             iid for iid, healthy in self._instances.items() if not healthy
         ]
+
+class MetricsServiceDiscovery():
+    def __init__(
+        self,
+        server_type: ServerType,
+        instances: list[int],
+        get_metrics_func,
+    ):
+        self.server_type = server_type
+        self._instances = {iid: True for iid in instances}
+        self._get_metrics_func = get_metrics_func
+    async def get_metrics(self) -> None:
+        metrics = {}
+        tasks = [
+            asyncio.create_task(
+                asyncio.wait_for(
+                    self._get_metrics_func(self.server_type, iid),
+                    timeout=1.0,
+                )
+            )
+            for iid in self._instances
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        log_msg = (
+            "Engine %03d: "
+            "Avg encoder consume seconds: %.3f ms, "
+            "Avg e2e time requests: %.3f ms, "
+            "Avg queue time requests: %.3f ms, "
+            "Avg prefill time requests: %.3f ms, "
+            "Avg mean time per output token requests: %.3f ms, "
+            "Avg time to first token: %.3f ms"
+        )
+        for iid, result in zip(self._instances.keys(), results):
+            if isinstance(result, dict):
+
+                msg = log_msg % (
+                    result.get("Engine", 0),
+                    result.get("encoder_consume_seconds", 0.0),
+                    result.get("e2e_time_requests", 0.0),
+                    result.get("queue_time_requests", 0.0),
+                    result.get("prefill_time_requests", 0.0),
+                    result.get("mean_time_per_output_token_requests", 0.0),
+                    result.get("time_to_first_token", 0.0),
+                )
+
+                metrics[iid] = msg
+            else:
+                logger.warning(
+                    "Get metrics for %s %s failed, reason is (%s).",
+                    self.server_type,
+                    iid,
+                    "timeout"
+                    if isinstance(result, asyncio.TimeoutError)
+                    else result,
+                )
+        logger.info("Metrics for %s: %s", self.server_type, metrics)
