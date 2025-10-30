@@ -88,7 +88,7 @@ class Proxy(EngineClient):
             enable_health_monitor=self.enable_health_monitor,
             health_check_interval=self.health_check_interval,
             health_threshold=self.health_threshold,
-            health_check_func=self.check_health,
+            health_check_func=self.check_health_disagg_worker,
         )
 
         self.pd_service_discovery = HealthCheckServiceDiscovery(
@@ -97,7 +97,7 @@ class Proxy(EngineClient):
             enable_health_monitor=self.enable_health_monitor,
             health_check_interval=self.health_check_interval,
             health_threshold=self.health_threshold,
-            health_check_func=self.check_health,
+            health_check_func=self.check_health_disagg_worker,
         )
         self.encode_request_stats_monitor = RequestStatsMonitor(
             list(range(len(self.encode_addr_list)))
@@ -459,7 +459,9 @@ class Proxy(EngineClient):
     ) -> None:
         pass
 
-    async def check_health(self, server_type: ServerType, id: int):
+    async def check_health_disagg_worker(
+        self, server_type: ServerType, id: int
+    ):
         request_id = str(uuid.uuid4())
         request = HeartbeatRequest(request_id=request_id)
         q: asyncio.Queue = asyncio.Queue()
@@ -490,6 +492,34 @@ class Proxy(EngineClient):
             ) from e
         finally:
             self.queues.pop(request_id, None)
+
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""
+        # Check health of all workers (both encode and PD instances)
+        tasks = []
+        for i in range(len(self.to_encode_sockets)):
+            tasks.append(
+                self.check_health_disagg_worker(ServerType.E_INSTANCE, i)
+            )
+        for i in range(len(self.to_pd_sockets)):
+            tasks.append(
+                self.check_health_disagg_worker(ServerType.PD_INSTANCE, i)
+            )
+
+        # If no workers are configured, consider the proxy healthy
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Raise if any health check failed
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
+            elif result is not True:
+                raise RuntimeError(
+                    "Health check failed for one or more workers"
+                )
 
     async def start_profile(self) -> None:
         raise NotImplementedError
