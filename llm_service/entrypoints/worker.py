@@ -4,7 +4,7 @@
 import uvloop
 
 from llm_service.workers.vllm.disagg_worker import DisaggWorker
-from vllm.engine.async_llm_engine import AsyncEngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.logger import init_logger
