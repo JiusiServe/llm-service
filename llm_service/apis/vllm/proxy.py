@@ -495,7 +495,7 @@ class Proxy(EngineClient):
         for result in results:
             if isinstance(result, Exception):
                 raise result
-            elif result is False:
+            elif result is not True:
                 raise RuntimeError("Health check failed for one or more workers")
 
     async def start_profile(self) -> None:
