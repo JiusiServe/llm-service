@@ -17,6 +17,8 @@ from llm_service.protocol.protocol import (
     GenerationResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    ProfileRequest,
+    ProfileResponse,
     RequestType,
     ResponseType,
 )
@@ -46,6 +48,7 @@ class DisaggWorker:
         self.decoder_generate = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
+        self.decoder_profile = msgspec.msgpack.Decoder(ProfileRequest)
         self.encoder = msgspec.msgpack.Encoder()
 
         self.running_requests: set[asyncio.Task] = set()
@@ -84,6 +87,12 @@ class DisaggWorker:
         elif req_type == RequestType.HEARTBEAT:
             hb_req = self.decoder_heartbeat.decode(req_data)
             await self._heartbeat_handler(hb_req)
+        elif req_type == RequestType.START_PROFILE:
+            profile_req = self.decoder_profile.decode(req_data)
+            await self._start_profile_handler(profile_req)
+        elif req_type == RequestType.STOP_PROFILE:
+            profile_req = self.decoder_profile.decode(req_data)
+            await self._stop_profile_handler(profile_req)
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
@@ -113,6 +122,52 @@ class DisaggWorker:
         )
         await self.to_proxy.send_multipart(msg, copy=False)
 
+    async def _start_profile_handler(self, req: ProfileRequest):
+        """Start profiling on the engine."""
+        try:
+            await self.engine.start_profile()
+            msg = (
+                ResponseType.PROFILE,
+                self.encoder.encode(
+                    ProfileResponse(request_id=req.request_id, status="OK")
+                ),
+            )
+        except Exception as e:
+            logger.exception("Failed to start profiling for request %s", req.request_id)
+            msg = (
+                ResponseType.FAILURE,
+                self.encoder.encode(
+                    FailureResponse(
+                        request_id=req.request_id,
+                        error_message=str(e) or type(e).__name__,
+                    )
+                ),
+            )
+        await self.to_proxy.send_multipart(msg, copy=False)
+
+    async def _stop_profile_handler(self, req: ProfileRequest):
+        """Stop profiling on the engine."""
+        try:
+            await self.engine.stop_profile()
+            msg = (
+                ResponseType.PROFILE,
+                self.encoder.encode(
+                    ProfileResponse(request_id=req.request_id, status="OK")
+                ),
+            )
+        except Exception as e:
+            logger.exception("Failed to stop profiling for request %s", req.request_id)
+            msg = (
+                ResponseType.FAILURE,
+                self.encoder.encode(
+                    FailureResponse(
+                        request_id=req.request_id,
+                        error_message=str(e) or type(e).__name__,
+                    )
+                ),
+            )
+        await self.to_proxy.send_multipart(msg, copy=False)
+
     async def _generate(
         self,
         req: GenerationRequest,
@@ -134,9 +189,7 @@ class DisaggWorker:
             )
 
             async for request_output in generator:
-                response = GenerationResponse.from_request_output(
-                    request_output
-                )
+                response = GenerationResponse.from_request_output(request_output)
 
                 response_bytes = self.encoder.encode(response)
                 msg = make_msg_func(response_bytes)
@@ -158,9 +211,9 @@ def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:
     decoded_list: list[NDArray[Any]] = []
     for img in images:
         if img["type"] == "ndarray":
-            decoded_img = np.frombuffer(
-                bytes(img["data"]), dtype=img["dtype"]
-            ).reshape(img["shape"])
+            decoded_img = np.frombuffer(bytes(img["data"]), dtype=img["dtype"]).reshape(
+                img["shape"]
+            )
             decoded_list.append(decoded_img)
     result_images: list[NDArray[Any]] | NDArray[Any]
     if len(decoded_list) == 1:
