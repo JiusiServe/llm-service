@@ -485,13 +485,17 @@ class Proxy(EngineClient):
         for i in range(len(self.to_pd_sockets)):
             tasks.append(self.check_health_disagg_worker(ServerType.PD_INSTANCE, i))
 
+        # If no workers are configured, consider the proxy healthy
+        if not tasks:
+            return
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Raise if any health check failed
         for result in results:
             if isinstance(result, Exception):
                 raise result
-            elif not result:
+            elif result is False:
                 raise RuntimeError("Health check failed for one or more workers")
 
     async def start_profile(self) -> None:
