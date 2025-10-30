@@ -184,7 +184,7 @@ class MetricsServiceDiscovery():
             if isinstance(result, dict):
 
                 msg = log_msg % (
-                    result.get("Engine", 0),
+                    result.get("engine_index", 0),
                     result.get("encoder_consume_seconds", 0.0),
                     result.get("e2e_time_requests", 0.0),
                     result.get("queue_time_requests", 0.0),

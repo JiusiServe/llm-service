@@ -155,8 +155,8 @@ class Proxy(EngineClient):
 
         self.proxy_to_pd_time_start: dict[str, float] = {}
         self.proxy_to_encode_time_start: dict[str, float] = {}
-        self.proxy_to_pd_time: dict[str, float] = {}
-        self.proxy_to_encode_time: dict[str, float] = {}
+        self.proxy_to_pd_time: list[float] = [0.0, 0.0] # count, total time
+        self.proxy_to_encode_time: list[float] = [0.0, 0.0] # count, total time
 
     def shutdown(self):
         self.ctx.destroy()
@@ -202,9 +202,12 @@ class Proxy(EngineClient):
             response = await q.get()
             if TIMECOUNT_ENABLED and isinstance(response, GenerationResponse) \
                 and response.proxy_to_worker_time_end:
-                self.proxy_to_pd_time[request.request_id] = \
-                    self.proxy_to_encode_time_start[request.request_id] - \
-                        response.proxy_to_worker_time_end
+                for rid in self.proxy_to_encode_time_start:
+                    if rid == request.request_id:
+                        self.proxy_to_encode_time[0] += 1
+                        self.proxy_to_encode_time[1] += \
+                            self.proxy_to_encode_time_start[rid] - \
+                            response.proxy_to_worker_time_end
 
             if isinstance(response, Exception):
                 raise response
@@ -249,9 +252,14 @@ class Proxy(EngineClient):
             response = await q.get()
             if TIMECOUNT_ENABLED and isinstance(response, GenerationResponse) \
                 and response.proxy_to_worker_time_end:
-                self.proxy_to_pd_time[request.request_id] = \
-                    self.proxy_to_pd_time_start[request.request_id] - \
-                        response.proxy_to_worker_time_end
+                self.proxy_to_pd_time[0] += 1
+                for rid in self.proxy_to_pd_time_start:
+                    if rid == request.request_id:
+                        self.proxy_to_pd_time[0] += 1
+                        self.proxy_to_pd_time[1] += \
+                            self.proxy_to_pd_time_start[rid] - \
+                            response.proxy_to_worker_time_end
+                        break
             finished = False
             while not finished:
                 response = await q.get()
@@ -551,6 +559,20 @@ class Proxy(EngineClient):
             # calculate proxy to pd/encode time
             if isinstance(response,
                           MetricsResponse) and response.metrics is not None:
+                # calculate proxy to pd/encode time average
+                # add to metrics
+                proxy2pd_avg = (
+                    self.proxy_to_pd_time[1] / self.proxy_to_pd_time[0]
+                    if self.proxy_to_pd_time[0] > 0 else 0.0
+                )
+                proxy2encode_avg = (
+                    self.proxy_to_encode_time[1] / self.proxy_to_encode_time[0]
+                    if self.proxy_to_encode_time[0] > 0 else 0.0
+                )
+                response.metrics.update({
+                    "proxy_to_pd_time_avg": proxy2pd_avg,
+                    "proxy_to_encode_time_avg": proxy2encode_avg,
+                })
                 return response.metrics
             elif isinstance(response, Exception):
                 raise response
