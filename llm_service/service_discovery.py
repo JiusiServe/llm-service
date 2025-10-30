@@ -190,7 +190,7 @@ class MetricsServiceDiscovery():
 
                 msg = log_msg % (
                     result.get("engine_index", 0),
-                    result.get("encoder_consume_time", 0.0),
+                    result.get("encoder_consume_seconds", 0.0),
                     result.get("e2e_time_requests", 0.0),
                     result.get("queue_time_requests", 0.0),
                     result.get("prefill_time_requests", 0.0),
@@ -211,5 +211,6 @@ class MetricsServiceDiscovery():
                     if isinstance(result, asyncio.TimeoutError)
                     else result,
                 )
+        print("Metrics for %s instances:" % self.server_type)
         for iid, metric in metrics.items():
-            logger.info("Metrics for %s %d: %s", self.server_type, iid, metric)
+            print(metric)
