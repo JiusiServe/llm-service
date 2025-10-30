@@ -13,7 +13,7 @@ import numpy as np
 import zmq
 import zmq.asyncio
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from llm_service.protocol.protocol import (
     FailureResponse,
     GenerationRequest,
@@ -458,6 +458,10 @@ class Proxy(EngineClient):
         raise NotImplementedError
 
     async def abort(self, request_id: str) -> None:
+        raise NotImplementedError
+
+    async def get_vllm_config(self) -> VllmConfig:
+        """Get the vllm configuration of the vLLM engine."""
         raise NotImplementedError
 
     async def get_model_config(self) -> ModelConfig:
