@@ -193,7 +193,9 @@ class Proxy(EngineClient):
         The PD worker is selected based on hashing the request ID.
         """
         if not self.to_pd_sockets:
-            raise RuntimeError("No PD workers configured: pd_addr_list is empty.")
+            raise RuntimeError(
+                "No PD workers configured: pd_addr_list is empty."
+            )
 
         try:
             payload = self.encoder.encode(request)
@@ -204,7 +206,9 @@ class Proxy(EngineClient):
         health_endpoints = self.pd_service_discovery.get_health_endpoints()
         request_stats = self.pd_request_stats_monitor.get_request_stats()
         idx = self.pd_router.route_request(health_endpoints, request_stats)
-        self.pd_request_stats_monitor.on_new_request(idx, request_id=request.request_id)
+        self.pd_request_stats_monitor.on_new_request(
+            idx, request_id=request.request_id
+        )
 
         try:
             socket = self.to_pd_sockets[idx]
@@ -262,7 +266,9 @@ class Proxy(EngineClient):
     ):
         # lazy initialization
         if self.output_handler is None:
-            self.output_handler = asyncio.create_task(self._run_output_handler())
+            self.output_handler = asyncio.create_task(
+                self._run_output_handler()
+            )
         if self.encode_service_discovery.should_launch_health_monitor():
             self.encode_service_discovery.launch_health_monitor()
         if self.pd_service_discovery.should_launch_health_monitor():
@@ -292,7 +298,9 @@ class Proxy(EngineClient):
             request = msgspec.convert(req_dict, GenerationRequest, strict=True)
 
             if _has_mm_data(prompt):
-                request.multi_modal_data = _encode_mm_data(prompt["multi_modal_data"])
+                request.multi_modal_data = _encode_mm_data(
+                    prompt["multi_modal_data"]
+                )
                 await self._run_encode(request, q)
 
             # TODO: support pd separation
@@ -346,7 +354,9 @@ class Proxy(EngineClient):
                 encode_unhealths = (
                     self.encode_service_discovery.get_unhealth_endpoints()
                 )
-                pd_unhealths = self.pd_service_discovery.get_unhealth_endpoints()
+                pd_unhealths = (
+                    self.pd_service_discovery.get_unhealth_endpoints()
+                )
                 tasks = []
                 if encode_unhealths:
                     tasks.append(
@@ -373,7 +383,9 @@ class Proxy(EngineClient):
                 resp_type, payload = await socket.recv_multipart()
 
                 # Decode response according to its type.
-                resp: Union[GenerationResponse, HeartbeatResponse, FailureResponse]
+                resp: Union[
+                    GenerationResponse, HeartbeatResponse, FailureResponse
+                ]
                 if resp_type in (ResponseType.GENERATION, ResponseType.ENCODE):
                     resp = decoder.decode(payload)
                 elif resp_type == ResponseType.HEARTBEAT:
@@ -447,7 +459,9 @@ class Proxy(EngineClient):
     ) -> None:
         pass
 
-    async def check_health_disagg_worker(self, server_type: ServerType, id: int):
+    async def check_health_disagg_worker(
+        self, server_type: ServerType, id: int
+    ):
         request_id = str(uuid.uuid4())
         request = HeartbeatRequest(request_id=request_id)
         q: asyncio.Queue = asyncio.Queue()
@@ -462,7 +476,10 @@ class Proxy(EngineClient):
 
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
-            if isinstance(response, HeartbeatResponse) and response.status == "OK":
+            if (
+                isinstance(response, HeartbeatResponse)
+                and response.status == "OK"
+            ):
                 return True
             elif isinstance(response, Exception):
                 raise response
@@ -481,9 +498,13 @@ class Proxy(EngineClient):
         # Check health of all workers (both encode and PD instances)
         tasks = []
         for i in range(len(self.to_encode_sockets)):
-            tasks.append(self.check_health_disagg_worker(ServerType.E_INSTANCE, i))
+            tasks.append(
+                self.check_health_disagg_worker(ServerType.E_INSTANCE, i)
+            )
         for i in range(len(self.to_pd_sockets)):
-            tasks.append(self.check_health_disagg_worker(ServerType.PD_INSTANCE, i))
+            tasks.append(
+                self.check_health_disagg_worker(ServerType.PD_INSTANCE, i)
+            )
 
         # If no workers are configured, consider the proxy healthy
         if not tasks:
@@ -496,7 +517,9 @@ class Proxy(EngineClient):
             if isinstance(result, Exception):
                 raise result
             elif result is not True:
-                raise RuntimeError("Health check failed for one or more workers")
+                raise RuntimeError(
+                    "Health check failed for one or more workers"
+                )
 
     async def start_profile(self) -> None:
         raise NotImplementedError
