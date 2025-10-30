@@ -13,8 +13,7 @@ import numpy as np
 import zmq
 import zmq.asyncio
 
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.config import ModelConfig, VllmConfig
 from llm_service.protocol.protocol import (
     FailureResponse,
     GenerationRequest,
@@ -485,9 +484,6 @@ class Proxy(EngineClient):
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def get_decoding_config(self) -> DecodingConfig:
-        raise NotImplementedError
-
     async def get_input_preprocessor(self) -> InputPreprocessor:
         raise NotImplementedError
 
@@ -502,11 +498,7 @@ class Proxy(EngineClient):
     async def is_tracing_enabled(self) -> bool:
         return False
 
-    async def do_log_stats(
-        self,
-        scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[list[SamplerOutput]] = None,
-    ) -> None:
+    async def do_log_stats(self) -> None:
         pass
 
     async def check_health(self, server_type: ServerType, id: int):
@@ -597,13 +589,13 @@ class Proxy(EngineClient):
     async def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    async def wake_up(self) -> None:
+    async def wake_up(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
     async def is_sleeping(self) -> bool:
         return False
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
     @property
@@ -618,9 +610,6 @@ class Proxy(EngineClient):
 
     def is_stopped(self) -> bool:
         return False
-
-    async def get_vllm_config(self) -> VllmConfig:
-        raise NotImplementedError
 
     async def reset_mm_cache(self) -> None:
         raise NotImplementedError
