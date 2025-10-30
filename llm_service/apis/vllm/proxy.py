@@ -186,9 +186,8 @@ class Proxy(EngineClient):
                     if rid == request.request_id:
                         self.proxy_to_encode_time[0] += 1
                         self.proxy_to_encode_time[1] += \
-                            self.proxy_to_encode_time_start[rid] - \
-                            response.proxy_to_worker_time_end
-
+                            response.proxy_to_worker_time_end - \
+                            self.proxy_to_encode_time_start[rid]
             if isinstance(response, Exception):
                 raise response
         finally:
@@ -237,8 +236,8 @@ class Proxy(EngineClient):
                     if rid == request.request_id:
                         self.proxy_to_pd_time[0] += 1
                         self.proxy_to_pd_time[1] += \
-                            self.proxy_to_pd_time_start[rid] - \
-                            response.proxy_to_worker_time_end
+                            response.proxy_to_worker_time_end - \
+                            self.proxy_to_pd_time_start[rid]
                         break
             finished = False
             while not finished:

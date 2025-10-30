@@ -159,6 +159,7 @@ class MetricsServiceDiscovery():
         self.server_type = server_type
         self._instances = {iid: True for iid in instances}
         self._get_metrics_func = get_metrics_func
+
     async def get_metrics(self) -> None:
         metrics = {}
         tasks = [
@@ -173,24 +174,30 @@ class MetricsServiceDiscovery():
         results = await asyncio.gather(*tasks, return_exceptions=True)
         log_msg = (
             "Engine %03d: "
-            "Avg encoder consume seconds: %.3f ms, "
+            "Avg encoder consume requests: %.3f ms, "
             "Avg e2e time requests: %.3f ms, "
             "Avg queue time requests: %.3f ms, "
             "Avg prefill time requests: %.3f ms, "
             "Avg mean time per output token requests: %.3f ms, "
-            "Avg time to first token: %.3f ms"
+            "Avg time to first token: %.3f ms, "
+            "Avg proxy to encoder requests: %.3f ms, " \
+                if self.server_type== ServerType.E_INSTANCE else \
+                    "Avg proxy to pd requests: %.3f ms, "
         )
         for iid, result in zip(self._instances.keys(), results):
             if isinstance(result, dict):
 
                 msg = log_msg % (
                     result.get("engine_index", 0),
-                    result.get("encoder_consume_seconds", 0.0),
+                    result.get("encoder_consume_time", 0.0),
                     result.get("e2e_time_requests", 0.0),
                     result.get("queue_time_requests", 0.0),
                     result.get("prefill_time_requests", 0.0),
                     result.get("mean_time_per_output_token_requests", 0.0),
                     result.get("time_to_first_token", 0.0),
+                    result.get("proxy_to_encode_time_avg", 0.0) \
+                        if self.server_type== ServerType.E_INSTANCE else \
+                        result.get("proxy_to_pd_time_avg", 0.0)
                 )
 
                 metrics[iid] = msg
@@ -203,4 +210,5 @@ class MetricsServiceDiscovery():
                     if isinstance(result, asyncio.TimeoutError)
                     else result,
                 )
-        logger.info("Metrics for %s: %s", self.server_type, metrics)
+        for iid, metric in metrics.items():
+            logger.info("Metrics for %s %d: %s", self.server_type, iid, metric)
