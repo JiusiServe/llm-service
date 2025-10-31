@@ -28,10 +28,9 @@ from llm_service.protocol.protocol import (
 )
 from llm_service.request_stats import RequestStatsMonitor
 from llm_service.routing_logic import RandomRouter, RoutingInterface
-from llm_service.service_discovery import (
-    HealthCheckServiceDiscovery,
-    MetricsServiceDiscovery,
-)
+from llm_service.service_discovery import HealthCheckServiceDiscovery
+from llm_service.metrics_reporter import MetricsReporter
+
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.data import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -103,12 +102,12 @@ class Proxy(EngineClient):
             health_threshold=self.health_threshold,
             health_check_func=self.check_health,
         )
-        self.pd_metrics_logger = MetricsServiceDiscovery(
+        self.pd_metrics_logger = MetricsReporter(
             server_type=ServerType.PD_INSTANCE,
             instances=list(range(len(self.pd_addr_list))),
             get_metrics_func=self.get_metrics,
         )
-        self.encoder_metrics_logger = MetricsServiceDiscovery(
+        self.encoder_metrics_logger = MetricsReporter(
             server_type=ServerType.E_INSTANCE,
             instances=list(range(len(self.encode_addr_list))),
             get_metrics_func=self.get_metrics,

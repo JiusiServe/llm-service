@@ -100,21 +100,21 @@ class DisaggWorker:
             hb_req = self.decoder_heartbeat.decode(req_data)
             await self._heartbeat_handler(hb_req)
         elif req_type == RequestType.METRICS:
-            req = self.decoder_metrics.decode(req_data)
-            await self._metrics_handler(req)
+            metrics_req = self.decoder_metrics.decode(req_data)
+            await self._metrics_handler(metrics_req)
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
     async def _encode_handler(self, req: GenerationRequest):
         task = asyncio.create_task(
-            self._generate(req, MsgFunc(ResponseType.ENCODE))
+            self._generate(req, lambda b: (ResponseType.ENCODE, b))
         )
         self.running_requests.add(task)
         task.add_done_callback(self.running_requests.discard)
 
     async def _generation_handler(self, req: GenerationRequest):
         task = asyncio.create_task(
-            self._generate(req, MsgFunc(ResponseType.GENERATION))
+            self._generate(req, lambda b: (ResponseType.GENERATION, b))
         )
         self.running_requests.add(task)
         task.add_done_callback(self.running_requests.discard)
@@ -169,17 +169,8 @@ class DisaggWorker:
                 response = GenerationResponse.from_request_output(
                     request_output
                 )
-                if TIMECOUNT_ENABLED:
-                    if (
-                        make_msg_func.msg_type == ResponseType.ENCODE
-                        and not response.proxy_to_worker_time_end
-                    ):
-                        response.proxy_to_worker_time_end = _recv_time
-                    elif (
-                        make_msg_func.msg_type == ResponseType.GENERATION
-                        and not response.proxy_to_worker_time_end
-                    ):
-                        response.proxy_to_worker_time_end = _recv_time
+                if TIMECOUNT_ENABLED and not response.proxy_to_worker_time_end:
+                    response.proxy_to_worker_time_end = _recv_time
                 response_bytes = self.encoder.encode(response)
                 msg = make_msg_func(response_bytes)
                 await self.to_proxy.send_multipart(msg, copy=False)
@@ -191,15 +182,6 @@ class DisaggWorker:
             response_bytes = self.encoder.encode(failure_resp)
             msg = (ResponseType.FAILURE, response_bytes)
             await self.to_proxy.send_multipart(msg, copy=False)
-
-
-class MsgFunc:
-    def __init__(self, msg_type):
-        self.msg_type = msg_type
-
-    def __call__(self, b):
-        return (self.msg_type, b)
-
 
 def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:
     images = mm_data.get("image", [])
