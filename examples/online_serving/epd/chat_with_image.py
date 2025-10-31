@@ -9,6 +9,10 @@ from PIL import Image
 
 from vllm import SamplingParams
 from llm_service.apis.vllm.proxy import Proxy
+import os
+
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
+                              "0") in ("1", "true", "True")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--proxy-addr", required=True, help="Proxy address")
@@ -77,9 +81,9 @@ async def main():
             for i in range(10)
         ]
         await asyncio.gather(*tasks)
-
-        await p.pd_metrics_logger.get_metrics()
-        await p.encoder_metrics_logger.get_metrics()
+        if TIMECOUNT_ENABLED:
+            await p.pd_metrics_logger.get_metrics()
+            await p.encoder_metrics_logger.get_metrics()
     finally:
         p.shutdown()
 
