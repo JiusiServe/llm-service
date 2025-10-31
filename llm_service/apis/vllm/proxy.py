@@ -185,8 +185,8 @@ class Proxy(EngineClient):
             ):
                 self.proxy_to_encode_time[0] += 1
                 self.proxy_to_encode_time[1] += (
-                    response.proxy_to_worker_time_end - \
-                        proxy_to_encode_time_start # type: ignore
+                    response.proxy_to_worker_time_end
+                    - proxy_to_encode_time_start  # type: ignore
                 )
 
             if isinstance(response, Exception):
@@ -241,7 +241,7 @@ class Proxy(EngineClient):
                     self.proxy_to_pd_time[0] += 1
                     self.proxy_to_pd_time[1] += (
                         response.proxy_to_worker_time_end
-                        - proxy_to_pd_time_start # type: ignore
+                        - proxy_to_pd_time_start  # type: ignore
                     )
                 finished = response.finish_reason is not None
                 yield response

@@ -9,9 +9,7 @@ import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter(
-    "%(levelname)s %(message)s"
-))
+handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
 logger.addHandler(handler)
 
 

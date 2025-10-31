@@ -150,7 +150,8 @@ class DisaggWorker:
     ):
         request_id = req.request_id
         _recv_time = {
-            "recv": time.perf_counter(), "first_token_flag": True
+            "recv": time.perf_counter(),
+            "first_token_flag": True,
         }  # time of worker receive request from proxy
         try:
             prompt_payload: dict[str, Any] = {"prompt": req.prompt}
@@ -183,6 +184,7 @@ class DisaggWorker:
             response_bytes = self.encoder.encode(failure_resp)
             msg = (ResponseType.FAILURE, response_bytes)
             await self.to_proxy.send_multipart(msg, copy=False)
+
 
 def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:
     images = mm_data.get("image", [])
