@@ -28,7 +28,10 @@ from llm_service.protocol.protocol import (
 )
 from llm_service.request_stats import RequestStatsMonitor
 from llm_service.routing_logic import RandomRouter, RoutingInterface
-from llm_service.service_discovery import HealthCheckServiceDiscovery, MetricsServiceDiscovery
+from llm_service.service_discovery import (
+    HealthCheckServiceDiscovery,
+    MetricsServiceDiscovery,
+)
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.data import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -40,8 +43,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device
 
-TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
-                              "0") in ("1", "true", "True")
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED", "0") in ("1", "true", "True")
 
 logger = init_logger(__name__)
 
@@ -104,12 +106,12 @@ class Proxy(EngineClient):
         self.pd_metrics_logger = MetricsServiceDiscovery(
             server_type=ServerType.PD_INSTANCE,
             instances=list(range(len(self.pd_addr_list))),
-            get_metrics_func=self.get_metrics
+            get_metrics_func=self.get_metrics,
         )
         self.encoder_metrics_logger = MetricsServiceDiscovery(
             server_type=ServerType.E_INSTANCE,
             instances=list(range(len(self.encode_addr_list))),
-            get_metrics_func=self.get_metrics
+            get_metrics_func=self.get_metrics,
         )
         self.encode_request_stats_monitor = RequestStatsMonitor(
             list(range(len(self.encode_addr_list)))
@@ -135,8 +137,8 @@ class Proxy(EngineClient):
 
         self.proxy_to_pd_time_start: dict[str, float] = {}
         self.proxy_to_encode_time_start: dict[str, float] = {}
-        self.proxy_to_pd_time: list[float] = [0.0, 0.0] # count, total time
-        self.proxy_to_encode_time: list[float] = [0.0, 0.0] # count, total time
+        self.proxy_to_pd_time: list[float] = [0.0, 0.0]  # count, total time
+        self.proxy_to_encode_time: list[float] = [0.0, 0.0]  # count, total time
 
     def shutdown(self):
         self.ctx.destroy()
@@ -176,18 +178,23 @@ class Proxy(EngineClient):
         try:
             socket = self.to_encode_sockets[idx]
             if TIMECOUNT_ENABLED:
-                self.proxy_to_encode_time_start[request.request_id] = \
+                self.proxy_to_encode_time_start[request.request_id] = (
                     time.perf_counter()
+                )
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
-            if TIMECOUNT_ENABLED and isinstance(response, GenerationResponse) \
-                and response.proxy_to_worker_time_end:
+            if (
+                TIMECOUNT_ENABLED
+                and isinstance(response, GenerationResponse)
+                and response.proxy_to_worker_time_end
+            ):
                 for rid in self.proxy_to_encode_time_start:
                     if rid == request.request_id:
                         self.proxy_to_encode_time[0] += 1
-                        self.proxy_to_encode_time[1] += \
-                            response.proxy_to_worker_time_end - \
-                            self.proxy_to_encode_time_start[rid]
+                        self.proxy_to_encode_time[1] += (
+                            response.proxy_to_worker_time_end
+                            - self.proxy_to_encode_time_start[rid]
+                        )
             if isinstance(response, Exception):
                 raise response
         finally:
@@ -225,19 +232,24 @@ class Proxy(EngineClient):
         try:
             socket = self.to_pd_sockets[idx]
             if TIMECOUNT_ENABLED:
-                self.proxy_to_pd_time_start[request.request_id] = \
+                self.proxy_to_pd_time_start[request.request_id] = (
                     time.perf_counter()
+                )
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
-            if TIMECOUNT_ENABLED and isinstance(response, GenerationResponse) \
-                and response.proxy_to_worker_time_end:
+            if (
+                TIMECOUNT_ENABLED
+                and isinstance(response, GenerationResponse)
+                and response.proxy_to_worker_time_end
+            ):
                 self.proxy_to_pd_time[0] += 1
                 for rid in self.proxy_to_pd_time_start:
                     if rid == request.request_id:
                         self.proxy_to_pd_time[0] += 1
-                        self.proxy_to_pd_time[1] += \
-                            response.proxy_to_worker_time_end - \
-                            self.proxy_to_pd_time_start[rid]
+                        self.proxy_to_pd_time[1] += (
+                            response.proxy_to_worker_time_end
+                            - self.proxy_to_pd_time_start[rid]
+                        )
                         break
             finished = False
             while not finished:
@@ -509,7 +521,7 @@ class Proxy(EngineClient):
             ) from e
         finally:
             self.queues.pop(request_id, None)
-    
+
     async def get_metrics(self, server_type: ServerType, id: int):
         request_id = str(uuid.uuid4())
         request = MetricsRequest(request_id=request_id)
@@ -526,22 +538,28 @@ class Proxy(EngineClient):
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             # calculate proxy to pd/encode time
-            if isinstance(response,
-                          MetricsResponse) and response.metrics is not None:
+            if (
+                isinstance(response, MetricsResponse)
+                and response.metrics is not None
+            ):
                 # calculate proxy to pd/encode time average
                 # add to metrics
                 proxy2pd_avg = (
                     self.proxy_to_pd_time[1] / self.proxy_to_pd_time[0]
-                    if self.proxy_to_pd_time[0] > 0 else 0.0
+                    if self.proxy_to_pd_time[0] > 0
+                    else 0.0
                 )
                 proxy2encode_avg = (
                     self.proxy_to_encode_time[1] / self.proxy_to_encode_time[0]
-                    if self.proxy_to_encode_time[0] > 0 else 0.0
+                    if self.proxy_to_encode_time[0] > 0
+                    else 0.0
                 )
-                response.metrics.update({
-                    "proxy_to_pd_time_avg": proxy2pd_avg,
-                    "proxy_to_encode_time_avg": proxy2encode_avg,
-                })
+                response.metrics.update(
+                    {
+                        "proxy_to_pd_time_avg": proxy2pd_avg,
+                        "proxy_to_encode_time_avg": proxy2encode_avg,
+                    }
+                )
                 return response.metrics
             elif isinstance(response, Exception):
                 raise response
@@ -549,8 +567,12 @@ class Proxy(EngineClient):
                 return None
 
         except Exception as e:
-            raise RuntimeError("Get metrics failed for %s %s, exception: %s",
-                               server_type, id, e) from e
+            raise RuntimeError(
+                "Get metrics failed for %s %s, exception: %s",
+                server_type,
+                id,
+                e,
+            ) from e
         finally:
             self.queues.pop(request_id, None)
 

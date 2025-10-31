@@ -5,7 +5,6 @@ import asyncio
 import os
 import time
 from typing import Any
-from vllm.v1.metrics.loggers import EPDStatsLogger
 
 import msgspec
 import numpy as np
@@ -28,8 +27,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 import vllm.envs as envs
 
-TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
-                              "0") in ("1", "true", "True")
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED", "0") in ("1", "true", "True")
 
 logger = init_logger(__name__)
 
@@ -79,6 +77,7 @@ class DisaggWorker:
                 while True:
                     await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
                     await self.engine.do_log_stats()
+
             task = asyncio.create_task(_force_log())
             self.running_requests.add(task)
             task.add_done_callback(self.running_requests.discard)
@@ -133,11 +132,15 @@ class DisaggWorker:
         await self.to_proxy.send_multipart(msg, copy=False)
 
     async def _metrics_handler(self, req: MetricsRequest):
-        stats_logger: dict[int, dict[str, Any]] = await self.engine.get_epd_stats()
-        msg = (ResponseType.METRICS,
-                self.encoder.encode(
-                    MetricsResponse(request_id=req.request_id,
-                                    metrics=stats_logger)))
+        stats_logger: dict[
+            int, dict[str, Any]
+        ] = await self.engine.get_epd_stats()
+        msg = (
+            ResponseType.METRICS,
+            self.encoder.encode(
+                MetricsResponse(request_id=req.request_id, metrics=stats_logger)
+            ),
+        )
         await self.to_proxy.send_multipart(msg, copy=False)
 
     async def _generate(
@@ -146,7 +149,9 @@ class DisaggWorker:
         make_msg_func,
     ):
         request_id = req.request_id
-        _recv_time = time.perf_counter() # time of worker receive request from proxy
+        _recv_time = (
+            time.perf_counter()
+        )  # time of worker receive request from proxy
         try:
             prompt_payload: dict[str, Any] = {"prompt": req.prompt}
             if req.multi_modal_data is not None:
@@ -165,11 +170,15 @@ class DisaggWorker:
                     request_output
                 )
                 if TIMECOUNT_ENABLED:
-                    if make_msg_func.msg_type == ResponseType.ENCODE and \
-                        not response.proxy_to_worker_time_end:
+                    if (
+                        make_msg_func.msg_type == ResponseType.ENCODE
+                        and not response.proxy_to_worker_time_end
+                    ):
                         response.proxy_to_worker_time_end = _recv_time
-                    elif make_msg_func.msg_type == ResponseType.GENERATION and \
-                        not response.proxy_to_worker_time_end:
+                    elif (
+                        make_msg_func.msg_type == ResponseType.GENERATION
+                        and not response.proxy_to_worker_time_end
+                    ):
                         response.proxy_to_worker_time_end = _recv_time
                 response_bytes = self.encoder.encode(response)
                 msg = make_msg_func(response_bytes)
@@ -187,6 +196,7 @@ class DisaggWorker:
 class MsgFunc:
     def __init__(self, msg_type):
         self.msg_type = msg_type
+
     def __call__(self, b):
         return (self.msg_type, b)
 

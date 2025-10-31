@@ -149,7 +149,8 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
             iid for iid, healthy in self._instances.items() if not healthy
         ]
 
-class MetricsServiceDiscovery():
+
+class MetricsServiceDiscovery:
     def __init__(
         self,
         server_type: ServerType,
@@ -187,7 +188,6 @@ class MetricsServiceDiscovery():
             log_msg += "Avg proxy to pd requests: %.3f ms, "
         for iid, result in zip(self._instances.keys(), results):
             if isinstance(result, dict):
-
                 msg = log_msg % (
                     result.get("engine_index", 0),
                     result.get("encoder_consume_seconds", 0.0),
@@ -196,9 +196,9 @@ class MetricsServiceDiscovery():
                     result.get("prefill_time_requests", 0.0),
                     result.get("mean_time_per_output_token_requests", 0.0),
                     result.get("time_to_first_token", 0.0),
-                    result.get("proxy_to_encode_time_avg", 0.0) \
-                        if self.server_type== ServerType.E_INSTANCE \
-                            else result.get("proxy_to_pd_time_avg", 0.0)
+                    result.get("proxy_to_encode_time_avg", 0.0)
+                    if self.server_type == ServerType.E_INSTANCE
+                    else result.get("proxy_to_pd_time_avg", 0.0),
                 )
 
                 metrics[iid] = msg
