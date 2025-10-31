@@ -149,9 +149,9 @@ class DisaggWorker:
         make_msg_func,
     ):
         request_id = req.request_id
-        _recv_time = (
-            time.perf_counter()
-        )  # time of worker receive request from proxy
+        _recv_time = {
+            "recv": time.perf_counter(), "first_token_flag": True
+        }  # time of worker receive request from proxy
         try:
             prompt_payload: dict[str, Any] = {"prompt": req.prompt}
             if req.multi_modal_data is not None:
@@ -169,8 +169,9 @@ class DisaggWorker:
                 response = GenerationResponse.from_request_output(
                     request_output
                 )
-                if TIMECOUNT_ENABLED and not response.proxy_to_worker_time_end:
-                    response.proxy_to_worker_time_end = _recv_time
+                if TIMECOUNT_ENABLED and _recv_time["first_token_flag"]:
+                    response.proxy_to_worker_time_end = _recv_time["recv"]
+                    _recv_time["first_token_flag"] = False
                 response_bytes = self.encoder.encode(response)
                 msg = make_msg_func(response_bytes)
                 await self.to_proxy.send_multipart(msg, copy=False)

@@ -134,8 +134,6 @@ class Proxy(EngineClient):
             seed=42,
         )
 
-        self.proxy_to_pd_time_start: dict[str, float] = {}
-        self.proxy_to_encode_time_start: dict[str, float] = {}
         self.proxy_to_pd_time: list[float] = [0.0, 0.0]  # count, total time
         self.proxy_to_encode_time: list[float] = [0.0, 0.0]  # count, total time
 
@@ -177,9 +175,7 @@ class Proxy(EngineClient):
         try:
             socket = self.to_encode_sockets[idx]
             if TIMECOUNT_ENABLED:
-                self.proxy_to_encode_time_start[request.request_id] = (
-                    time.perf_counter()
-                )
+                proxy_to_encode_time_start = time.perf_counter()
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             if (
@@ -187,13 +183,12 @@ class Proxy(EngineClient):
                 and isinstance(response, GenerationResponse)
                 and response.proxy_to_worker_time_end
             ):
-                for rid in self.proxy_to_encode_time_start:
-                    if rid == request.request_id:
-                        self.proxy_to_encode_time[0] += 1
-                        self.proxy_to_encode_time[1] += (
-                            response.proxy_to_worker_time_end
-                            - self.proxy_to_encode_time_start[rid]
-                        )
+                self.proxy_to_encode_time[0] += 1
+                self.proxy_to_encode_time[1] += (
+                    response.proxy_to_worker_time_end - \
+                        proxy_to_encode_time_start # type: ignore
+                )
+
             if isinstance(response, Exception):
                 raise response
         finally:
@@ -231,30 +226,23 @@ class Proxy(EngineClient):
         try:
             socket = self.to_pd_sockets[idx]
             if TIMECOUNT_ENABLED:
-                self.proxy_to_pd_time_start[request.request_id] = (
-                    time.perf_counter()
-                )
+                proxy_to_pd_time_start = time.perf_counter()
             await socket.send_multipart(msg, copy=False)
-            response = await q.get()
-            if (
-                TIMECOUNT_ENABLED
-                and isinstance(response, GenerationResponse)
-                and response.proxy_to_worker_time_end
-            ):
-                self.proxy_to_pd_time[0] += 1
-                for rid in self.proxy_to_pd_time_start:
-                    if rid == request.request_id:
-                        self.proxy_to_pd_time[0] += 1
-                        self.proxy_to_pd_time[1] += (
-                            response.proxy_to_worker_time_end
-                            - self.proxy_to_pd_time_start[rid]
-                        )
-                        break
             finished = False
             while not finished:
                 response = await q.get()
                 if isinstance(response, Exception):
                     raise response
+                if (
+                    TIMECOUNT_ENABLED
+                    and isinstance(response, GenerationResponse)
+                    and response.proxy_to_worker_time_end
+                ):
+                    self.proxy_to_pd_time[0] += 1
+                    self.proxy_to_pd_time[1] += (
+                        response.proxy_to_worker_time_end
+                        - proxy_to_pd_time_start # type: ignore
+                    )
                 finished = response.finish_reason is not None
                 yield response
         finally:

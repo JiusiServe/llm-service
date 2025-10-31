@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the llm-service project
 
 import asyncio
-import time
-from abc import ABC, abstractmethod
 
 from llm_service.protocol.protocol import ServerType
 import logging
