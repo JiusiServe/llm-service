@@ -11,8 +11,7 @@ from vllm import SamplingParams
 from llm_service.apis.vllm.proxy import Proxy
 import os
 
-TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED",
-                              "0") in ("1", "true", "True")
+TIMECOUNT_ENABLED = os.getenv("TIMECOUNT_ENABLED", "0") in ("1", "true", "True")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--proxy-addr", required=True, help="Proxy address")
