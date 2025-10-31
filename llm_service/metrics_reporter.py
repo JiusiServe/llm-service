@@ -40,7 +40,6 @@ class MetricsReporter:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         log_msg = (
             "Engine %03d: "
-            "Avg encoder consume requests: %.3f ms, "
             "Avg e2e time requests: %.3f ms, "
             "Avg queue time requests: %.3f ms, "
             "Avg prefill time requests: %.3f ms, "
@@ -55,7 +54,6 @@ class MetricsReporter:
             if isinstance(result, dict):
                 msg = log_msg % (
                     result.get("engine_index", 0),
-                    result.get("encoder_consume_seconds", 0.0),
                     result.get("e2e_time_requests", 0.0),
                     result.get("queue_time_requests", 0.0),
                     result.get("prefill_time_requests", 0.0),
