@@ -132,8 +132,9 @@ class DisaggWorker:
         await self.to_proxy.send_multipart(msg, copy=False)
 
     async def _metrics_handler(self, req: MetricsRequest):
-        stats_logger: Optional[dict[str, Union[int, float]]] = \
-            await self.engine.get_epd_stats()
+        stats_logger: Optional[
+            dict[str, Union[int, float]]
+        ] = await self.engine.get_epd_stats()
         msg = (
             ResponseType.METRICS,
             self.encoder.encode(
