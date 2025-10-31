@@ -73,7 +73,7 @@ class DisaggWorker:
         poller = zmq.asyncio.Poller()
         poller.register(self.from_proxy, zmq.POLLIN)
         if TIMECOUNT_ENABLED:
-            # log engine stats(logger stats and EPD stats (if enabled))
+            # log engine stats (logger stats and EPD stats (if enabled))
             async def _force_log():
                 while True:
                     await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
