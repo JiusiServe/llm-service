@@ -66,14 +66,14 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser.add_argument(
         "--proxy-addr",
-        required=True,
+        required=False,
         nargs="+",
         help="List of proxy addresses",
     )
     parser.add_argument(
         "--worker-addr",
+        required=False,
         type=str,
-        required=True,
         help="The address of the worker.",
     )
     parser.add_argument(

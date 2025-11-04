@@ -5,6 +5,7 @@ import asyncio
 from collections import defaultdict
 import threading
 import time
+import zmq
 from typing import ClassVar, Optional, Union
 
 from llm_service.protocol.protocol import ServerType
@@ -215,31 +216,51 @@ class MetricsReporter:
     def __init__(
         self,
         server_type: ServerType,
-        instances: list[int],
-        addr: list[str],
+        instances: dict[str, zmq.asyncio.Socket],
         get_metrics_func,
     ):
         self.server_type = server_type
-        self._instances = {iid: True for iid in instances}
-        self.addr = addr
+        self._instances = instances
         self._get_metrics_func = get_metrics_func
+        self.proxy_to_instance_time_count: defaultdict[str, int] = defaultdict(
+            int
+        )
+        self.proxy_to_instance_time_total: defaultdict[str, float] = (
+            defaultdict(float)
+        )
+
+    def get_avg_proxy_to_instance_time(self, work_addr: str) -> float:
+        if work_addr not in self.proxy_to_instance_time_count:
+            logger.warning(
+                "work_addr %s not in proxy_to_instance_time_count", work_addr
+            )
+            return 0.0
+        return (
+            self.proxy_to_instance_time_total[work_addr]
+            / self.proxy_to_instance_time_count[work_addr]
+            if self.proxy_to_instance_time_count[work_addr] > 0
+            else 0.0
+        )
+
+    def add_proxy_to_instance_time(self, work_addr: str, time: float):
+        self.proxy_to_instance_time_count[work_addr] += 1
+        self.proxy_to_instance_time_total[work_addr] += time
 
     async def get_metrics(self) -> None:
         metrics = {}
         tasks = [
             asyncio.create_task(
                 asyncio.wait_for(
-                    self._get_metrics_func(self.server_type, iid),
+                    self._get_metrics_func(self.server_type, work_addr),
                     timeout=1.0,
                 )
             )
-            for iid in self._instances
+            for work_addr in self._instances.keys()
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         log_msg = (
             "ec_role: %s, "
             "addr: %s, "
-            "Engine %03d: "
             "Avg e2e time requests: %.3f ms, "
             "Avg queue time requests: %.3f ms, "
             "Avg prefill time requests: %.3f ms, "
@@ -251,15 +272,12 @@ class MetricsReporter:
         else:
             log_msg += "Avg proxy to pd requests: %.3f ms, "
         msg = ""
-        for iid, work_addr, result in zip(
-            self._instances.keys(), self.addr, results
-        ):
+        for work_addr, result in zip(self._instances.keys(), results):
             if isinstance(result, dict):
                 for _, value in result.items():
                     msg = log_msg % (
                         self.server_type.name,
                         work_addr,
-                        value.get("engine_index", 0),
                         value.get("e2e_time_requests", 0.0),
                         value.get("queue_time_requests", 0.0),
                         value.get("prefill_time_requests", 0.0),
@@ -270,7 +288,7 @@ class MetricsReporter:
                         else value.get("proxy_to_pd_time_avg", 0.0),
                     )
 
-                metrics[iid] = msg
+                metrics[work_addr] = msg
             else:
                 logger.warning(
                     "Get metrics for %s %s failed, reason is (%s).",
@@ -281,5 +299,5 @@ class MetricsReporter:
                     else result,
                 )
         logger.info("Metrics for %s instances:" % self.server_type)
-        for iid, metric in metrics.items():
+        for work_addr, metric in metrics.items():
             logger.info(metric)

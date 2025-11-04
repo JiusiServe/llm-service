@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the llm-service project
 
 from enum import Enum, auto
+import re
 from typing import Any, Optional, Union
-
+import socket
 import msgspec
 
 from vllm import SamplingParams
@@ -20,6 +21,7 @@ class ServerType(Enum):
     PD_INSTANCE = auto()
     P_INSTANCE = auto()
     D_INSTANCE = auto()
+    PROXY = auto()
 
 
 class RequestType:
@@ -101,4 +103,60 @@ class MetricsRequest(msgspec.Struct):
 
 class MetricsResponse(msgspec.Struct):
     request_id: str
-    metrics: Optional[dict[int, dict[str, Union[int, float]]]]
+    metrics: Optional[dict[str, dict[str, Union[int, float]]]]
+
+
+def get_local_ip() -> str:
+    """
+    Get the local IP address of the current node, supporting both IPv4 and IPv6
+
+    Returns:
+        str: Local IP address (IPv6 preferred if available, otherwise IPv4)
+    """
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        # Use Google's public IPv6 DNS server
+        s.connect(("2001:4860:4860::8888", 80))
+        ip = s.getsockname()[0]
+        return ip
+    except (socket.error, OSError):
+        # If IPv6 fails, fall back to IPv4
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            return ip
+        finally:
+            s.close()
+
+
+def get_open_port() -> int:
+    """
+    Get an available port number from the operating system
+
+    This function creates a temporary socket, binds it to port 0 (which
+    lets the OS assign an available port), gets the assigned port number,
+    and then closes the socket.
+
+    Returns:
+        int: An available port number that can be used for binding
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("localhost", 0))  # Bind to localhost on port 0
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        port = s.getsockname()[1]  # Get the assigned port
+    return port
+
+
+def is_addr_ipv6(addr: str) -> bool:
+    """
+    Check if the given address is an IPv6 address
+
+    Args:
+        addr (str): The address to check
+
+    Returns:
+        bool: True if the address is an IPv6 address, False otherwise
+    """
+    ipv6_pattern = r"^\[(.*?)\]:(\d+)$"
+    return bool(re.match(ipv6_pattern, addr))
