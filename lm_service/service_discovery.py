@@ -9,6 +9,9 @@ from abc import ABC, abstractmethod
 import zmq
 import zmq.asyncio
 
+import zmq
+import zmq.asyncio
+
 from lm_service.protocol.protocol import ServerType
 from lm_service.logger_utils import init_logger
 
@@ -60,12 +63,8 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
         self.enable_health_monitor = enable_health_monitor
         self._health_check_interval = health_check_interval
         self._health_threshold = health_threshold
-        self._success_count: dict[str, int] = {
-            addr: 0 for addr in instances.keys()
-        }
-        self._fail_count: dict[str, int] = {
-            addr: 0 for addr in instances.keys()
-        }
+        self._success_count: dict[str, int] = defaultdict(lambda: 0)
+        self._fail_count: dict[str, int] = defaultdict(lambda: 0)
         self._health_check_func = health_check_func
         self._health_monitor_handler = None
 

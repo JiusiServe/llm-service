@@ -55,6 +55,16 @@ class RedisMetastoreClient(MetastoreClientBase):
             to_d_sockets: Dictionary of ZMQ sockets for data service
         """
 
+        super().__init__(
+            metastore_client_config,
+            node_info,
+            engine_type,
+            to_proxy,
+            to_encode_sockets,
+            to_pd_sockets,
+            to_p_sockets,
+            to_d_sockets,
+        )
         self.host = (
             lm_service_envs.LM_SERVICE_REDIS_IP
             or metastore_client_config.metastore_host
@@ -79,30 +89,11 @@ class RedisMetastoreClient(MetastoreClientBase):
             if metastore_client_config is not None
             else None
         )
-        self.engine_type = engine_type
+
         self.redis_client = None  # Synchronous client
         self.async_redis_client = None  # Asynchronous client
-        self.reporting_task = None  # Asynchronous task for node reporting
-        self.update_socket_task = None  # Asynchronous task for socket updating
-        self.established_sockets: dict[str, zmq.asyncio.Socket] = {}
         self.ctx = zmq.asyncio.Context()
-        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = (
-            to_encode_sockets if to_encode_sockets is not None else {}
-        )
-        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = (
-            to_pd_sockets if to_pd_sockets is not None else {}
-        )
-        self.to_proxy: dict[str, zmq.asyncio.Socket] = (
-            to_proxy if to_proxy is not None else {}
-        )
-        self.to_p_sockets: dict[str, zmq.asyncio.Socket] = (
-            to_p_sockets if to_p_sockets is not None else {}
-        )
-        self.to_d_sockets: dict[str, zmq.asyncio.Socket] = (
-            to_d_sockets if to_d_sockets is not None else {}
-        )
 
-        self.node_info = node_info
         self.node_key = (
             f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{self.engine_type}"
         )
@@ -261,6 +252,9 @@ class RedisMetastoreClient(MetastoreClientBase):
             # Ensure value is a string
             value_str = str(value)
             self.redis_client.hset(key, field, value_str)
+            self.redis_client.expire(
+                key, lm_service_envs.LM_SERVICE_REDIS_KEY_TTL
+            )
             logger.debug(f"Redis key set successfully: {key}")
             return True
         except Exception as e:
@@ -288,6 +282,9 @@ class RedisMetastoreClient(MetastoreClientBase):
             # Ensure value is a string
             value_str = str(value)
             await self.async_redis_client.hset(key, field, value_str)
+            await self.async_redis_client.expire(
+                key, lm_service_envs.LM_SERVICE_REDIS_KEY_TTL
+            )
             logger.debug(f"Redis key set successfully (async): {key}")
             return True
         except Exception as e:
@@ -338,21 +335,73 @@ class RedisMetastoreClient(MetastoreClientBase):
             logger.error(f"Failed to get Redis key {key} (async): {str(e)}")
             return None
 
+    def delete_metadata(self, key: str, field: str) -> Optional[bool]:
+        """
+        Synchronously delete Redis key field
+
+        Args:
+            key: Key name
+            field: Field name
+
+        Returns:
+            Optional[bool]: Whether the deletion was successful
+        """
+        try:
+            if not self.redis_client:
+                logger.error("Synchronous Redis client not initialized")
+                return False
+
+            self.redis_client.hdel(key, field)
+            logger.debug(f"Redis key field deleted: {key}, field: {field}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete Redis key field {key}: {str(e)}")
+            return False
+
+    async def delete_metadata_async(
+        self, key: str, field: str
+    ) -> Optional[bool]:
+        """
+        Asynchronously delete Redis key field
+
+        Args:
+            key: Key name
+            field: Field name
+
+        Returns:
+            Optional[bool]: Whether the deletion was successful
+        """
+        try:
+            if not self.async_redis_client:
+                logger.error("Asynchronous Redis client not initialized")
+                return False
+
+            await self.async_redis_client.hdel(key, field)
+            logger.debug(
+                f"Redis key field deleted (async): {key}, field: {field}"
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to delete Redis key field {key} (async): {str(e)}"
+            )
+            return False
+
     def close(self):
         """
         Close Redis connections
         """
         try:
-            # Stop all async tasks
-            if self.reporting_task and not self.reporting_task.done():
-                self.reporting_task.cancel()
-                logger.info("Node reporting task cancelled")
-
-            if self.update_socket_task and not self.update_socket_task.done():
-                self.update_socket_task.cancel()
-                logger.info("Socket update task cancelled")
+            # Cancel all async tasks
+            if hasattr(self, "async_task") and self.async_task:
+                for task in self.async_task:
+                    if not task.done():
+                        task.cancel()
+                logger.info(f"Cancelled {len(self.async_task)} async tasks")
+                self.async_task.clear()
 
             if self.redis_client:
+                self.delete_metadata(self.node_key, self.node_info)
                 self.redis_client.close()
                 logger.info("Synchronous Redis connection closed")
 
@@ -371,7 +420,22 @@ class RedisMetastoreClient(MetastoreClientBase):
         Asynchronously close Redis connections
         """
         try:
+            # Cancel all async tasks
+            if hasattr(self, "async_task") and self.async_task:
+                for task in self.async_task:
+                    if not task.done():
+                        task.cancel()
+                # Wait for all tasks to be cancelled
+                if self.async_task:
+                    await asyncio.gather(
+                        *self.async_task, return_exceptions=True
+                    )
+                logger.info(f"Cancelled {len(self.async_task)} async tasks")
+                self.async_task.clear()
+
             if self.async_redis_client:
+                # Delete node info asynchronously
+                await self.delete_metadata_async(self.node_key, self.node_info)
                 await self.async_redis_client.close()
                 logger.info("Asynchronous Redis connection closed")
 

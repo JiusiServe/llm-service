@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 from dataclasses import dataclass
+from collections import defaultdict
 
 import zmq
 import zmq.asyncio
@@ -21,9 +22,9 @@ class RequestStatsMonitor:
 
     def __init__(self, instances: dict[str, zmq.asyncio.Socket]):
         # Key: instance addr
-        self.request_stats: dict[str, RequestStats] = {
-            addr: RequestStats(in_flight_requests=set()) for addr in instances
-        }
+        self.request_stats: dict[str, RequestStats] = defaultdict(
+            lambda: RequestStats(in_flight_requests=set())
+        )
         self.instances = instances
 
     def on_new_request(self, instance_addr: str, request_id: str):

@@ -26,16 +26,24 @@ class MetastoreClientBase(ABC):
         *args,
         **kwargs,
     ):
-        if to_proxy is None:
-            to_proxy = {}
-        if to_encode_sockets is None:
-            to_encode_sockets = {}
-        if to_pd_sockets is None:
-            to_pd_sockets = {}
-        if to_p_sockets is None:
-            to_p_sockets = {}
-        if to_d_sockets is None:
-            to_d_sockets = {}
+        self.metastore_client_config = metastore_client_config
+        self.node_info = node_info
+        self.engine_type = engine_type
+        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = (
+            to_encode_sockets if to_encode_sockets is not None else {}
+        )
+        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = (
+            to_pd_sockets if to_pd_sockets is not None else {}
+        )
+        self.to_proxy: dict[str, zmq.asyncio.Socket] = (
+            to_proxy if to_proxy is not None else {}
+        )
+        self.to_p_sockets: dict[str, zmq.asyncio.Socket] = (
+            to_p_sockets if to_p_sockets is not None else {}
+        )
+        self.to_d_sockets: dict[str, zmq.asyncio.Socket] = (
+            to_d_sockets if to_d_sockets is not None else {}
+        )
 
     def save_metadata(self, key: str, field: str, value: Any) -> Optional[bool]:
         """
@@ -101,12 +109,28 @@ class MetastoreClientBase(ABC):
         """
         pass
 
-    def delete_metadata(self, key: str) -> Optional[bool]:
+    def delete_metadata(self, key: str, field: str) -> Optional[bool]:
         """
         Delete metadata from metastore
 
         Args:
             key: Key name
+            field: Field name
+
+        Returns:
+            Optional[bool]: True if success, False if error occurs
+        """
+        pass
+
+    async def delete_metadata_async(
+        self, key: str, field: str
+    ) -> Optional[bool]:
+        """
+        Delete metadata from metastore asynchronously
+
+        Args:
+            key: Key name
+            field: Field name
 
         Returns:
             Optional[bool]: True if success, False if error occurs

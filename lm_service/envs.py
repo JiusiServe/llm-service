@@ -51,6 +51,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LM_SERVICE_REDIS_INTERVAL": lambda: int(
         os.getenv("LM_SERVICE_REDIS_INTERVAL", "10")
     ),
+    "LM_SERVICE_REDIS_KEY_TTL": lambda: int(
+        os.getenv("LM_SERVICE_REDIS_KEY_TTL", "600")
+    ),
     "LM_SERVICE_RPC_PORT": lambda: os.getenv("LM_SERVICE_RPC_PORT", None),
     "LM_SERVICE_METASTORE_CLIENT": lambda: os.getenv(
         "LM_SERVICE_METASTORE_CLIENT", None
