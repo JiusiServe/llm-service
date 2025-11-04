@@ -2,7 +2,7 @@
 
 LM-Service is a high-performance proxy designed for disaggregated serving of LLMs and LMMs, such as encoder disaggregation, prefill disaggregation, and more. It provides an OpenAI-compatible API for easy out-of-the-box use and offers a Python SDK for integration into custom serving frameworks.
 
-<img width="1204" height="1440" alt="image" src="docs/architecture/llm_service_arch.drawio.svg" />
+<img width="1204" height="1440" alt="image" src="docs/architecture/lm_service_arch.drawio.svg" />
 
 ## Key Components
 

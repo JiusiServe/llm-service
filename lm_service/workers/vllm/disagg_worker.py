@@ -3,7 +3,6 @@
 
 import asyncio
 import os
-import re
 import time
 from typing import Any, Optional, Union
 
@@ -12,6 +11,10 @@ import numpy as np
 from numpy.typing import NDArray
 import zmq
 import zmq.asyncio
+from vllm.engine.protocol import EngineClient
+from vllm.utils import get_ip, get_open_port
+import vllm.envs as envs
+from vllm.config import ECTransferConfig, KVTransferConfig
 
 from lm_service.stats_loggers import DisaggWorkerStatsLogger
 from lm_service.protocol.protocol import (
@@ -24,10 +27,20 @@ from lm_service.protocol.protocol import (
     MetricsResponse,
     RequestType,
     ResponseType,
+    ServerType,
 )
-from vllm.engine.protocol import EngineClient
-import vllm.envs as envs
 import lm_service.envs as lm_service_envs
+from lm_service.metastore_client.factory import (
+    MetastoreClientFactory,
+)
+from lm_service.metastore_client.metastore_client_config import (
+    MetastoreClientConfig,
+    json_to_metastore_config,
+)
+from lm_service.metastore_client.metastore_client import (
+    MetastoreClientBase,
+)
+from lm_service.utils import is_addr_ipv6
 
 from lm_service.logger_utils import init_logger
 
@@ -38,32 +51,70 @@ class DisaggWorker:
     def __init__(
         self,
         engine: EngineClient,
-        address: str,
-        proxy_addr: str | list[str],
+        address: Optional[str] = None,
+        proxy_addr: Optional[str | list[str]] = None,
         transfer_protocol: Optional[str] = None,
+        metastore_client_config: Optional[dict] = None,
+        ec_transfer_config: Optional[ECTransferConfig] = None,
+        kv_transfer_config: Optional[KVTransferConfig] = None,
     ):
         self.engine = engine
         self.transfer_protocol = (
             lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
-        self.worker_addr = f"{self.transfer_protocol}://{address}"
-        self.proxy_addr_list = [
-            f"{self.transfer_protocol}://{addr}" for addr in proxy_addr
-        ]
-        self.ctx = zmq.asyncio.Context()
-        ipv6_pattern = r"^\[(.*?)\]:(\d+)$"
-        if re.match(ipv6_pattern, address) and self.transfer_protocol == "tcp":
-            self.ctx.setsockopt(zmq.constants.IPV6, 1)
-        self.from_proxy = self.ctx.socket(zmq.constants.PULL)
-        self.from_proxy.bind(self.worker_addr)
+        self.ec_transfer_config = ec_transfer_config
+        self.kv_transfer_config = kv_transfer_config
         self.to_proxy: dict[str, zmq.asyncio.Socket] = {}
-        for addr in self.proxy_addr_list:
-            socket = self.ctx.socket(zmq.constants.PUSH)
-            socket.connect(addr)
-            self.to_proxy[addr] = socket
-        logger.info(
-            f"Worker address: {self.worker_addr}, proxy_addr: {self.proxy_addr_list}"
-        )
+        self.metastore_client: Optional[MetastoreClientBase] = None
+        if (
+            metastore_client_config is not None
+            or lm_service_envs.LM_SERVICE_METASTORE_CLIENT is not None
+        ):
+            config: MetastoreClientConfig = json_to_metastore_config(
+                metastore_client_config
+            )
+            worker_ip = get_ip()
+            worker_port = (
+                int(lm_service_envs.LM_SERVICE_RPC_PORT)
+                if lm_service_envs.LM_SERVICE_RPC_PORT
+                else get_open_port()
+            )
+            address = f"{worker_ip}:{worker_port}"
+            self.worker_addr = f"{self.transfer_protocol}://{address}"
+            self.ctx = zmq.asyncio.Context()
+            if is_addr_ipv6(address) and self.transfer_protocol == "tcp":
+                self.ctx.setsockopt(zmq.constants.IPV6, 1)
+            self.from_proxy = self.ctx.socket(zmq.constants.PULL)
+            self.from_proxy.bind(self.worker_addr)
+            self.metastore_client = (
+                MetastoreClientFactory.create_metastore_client(
+                    config=config,
+                    engine_type=self.get_server_type().value,
+                    node_info=self.worker_addr,
+                    to_proxy=self.to_proxy,
+                )
+            )
+        elif proxy_addr is None or address is None:
+            raise ValueError(
+                "proxy_addr and address must be provided if metastore_client_config is None"
+            )
+        else:
+            self.worker_addr = f"{self.transfer_protocol}://{address}"
+            self.proxy_addr_list = [
+                f"{self.transfer_protocol}://{addr}" for addr in proxy_addr
+            ]
+            self.ctx = zmq.asyncio.Context()
+            if is_addr_ipv6(address) and self.transfer_protocol == "tcp":
+                self.ctx.setsockopt(zmq.constants.IPV6, 1)
+            self.from_proxy = self.ctx.socket(zmq.constants.PULL)
+            self.from_proxy.bind(self.worker_addr)
+            for addr in self.proxy_addr_list:
+                socket = self.ctx.socket(zmq.constants.PUSH)
+                socket.connect(addr)
+                self.to_proxy[addr] = socket
+            logger.info(
+                f"Worker address: {self.worker_addr}, proxy_addr: {self.proxy_addr_list}"
+            )
         self.decoder_generate = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
@@ -83,6 +134,24 @@ class DisaggWorker:
         )
         if self.transfer_protocol == "ipc" and os.path.exists(socket_path):
             os.remove(socket_path)
+
+    def get_server_type(self) -> ServerType:
+        if (
+            self.ec_transfer_config
+            and self.ec_transfer_config.ec_role == "ec_producer"
+        ):
+            return ServerType.E_INSTANCE
+        elif self.kv_transfer_config:
+            if self.kv_transfer_config.kv_role == "kv_producer":
+                return ServerType.P_INSTANCE
+            return ServerType.D_INSTANCE
+        elif (
+            self.ec_transfer_config
+            and self.ec_transfer_config.ec_role == "ec_consumer"
+        ):
+            return ServerType.PD_INSTANCE
+        else:
+            return ServerType.PROXY
 
     async def run_busy_loop(self):
         logger.info("DisaggWorker is ready To handle requests.")
@@ -136,10 +205,17 @@ class DisaggWorker:
 
     async def _handle_response(self, req, msg):
         if req.proxy_addr not in self.to_proxy:
-            logger.error(
-                f"request {req.request_id} could not find proxy address {req.proxy_addr}."
-            )
-            return
+            if self.metastore_client is None:
+                logger.error(
+                    f"request {req.request_id} could not find proxy address {req.proxy_addr}."
+                )
+                return
+            await self.metastore_client.async_update_proxy_sockets()
+            if req.proxy_addr not in self.to_proxy:
+                logger.error(
+                    f"request {req.request_id} could not find proxy address {req.proxy_addr}."
+                )
+                return
 
         await self.to_proxy[req.proxy_addr].send_multipart(msg, copy=False)
 
@@ -170,7 +246,7 @@ class DisaggWorker:
         await self._handle_response(req, msg)
 
     async def _metrics_handler(self, req: MetricsRequest):
-        stats_logger: Optional[dict[int, dict[str, Union[int, float]]]] = (
+        stats_logger: Optional[dict[str, dict[str, Union[str, int, float]]]] = (
             DisaggWorkerStatsLogger.get_stats_snapshot_avg()
         )
         msg = (

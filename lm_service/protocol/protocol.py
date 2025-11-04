@@ -5,7 +5,6 @@ from enum import Enum, auto
 from typing import Any, Optional, Union
 
 import msgspec
-
 from vllm import SamplingParams
 from vllm.outputs import RequestOutput
 
@@ -20,6 +19,7 @@ class ServerType(Enum):
     PD_INSTANCE = auto()
     P_INSTANCE = auto()
     D_INSTANCE = auto()
+    PROXY = auto()
 
 
 class RequestType:
@@ -101,4 +101,4 @@ class MetricsRequest(msgspec.Struct):
 
 class MetricsResponse(msgspec.Struct):
     request_id: str
-    metrics: Optional[dict[int, dict[str, Union[int, float]]]]
+    metrics: Optional[dict[str, dict[str, Union[str, int, float]]]]

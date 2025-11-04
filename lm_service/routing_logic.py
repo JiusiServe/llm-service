@@ -7,7 +7,7 @@ from lm_service.request_stats import RequestStats
 
 
 class RoutingInterface:
-    def route_request(self, endpoints: list[int], request_stats: dict) -> int:
+    def route_request(self, endpoints: list[str], request_stats: dict) -> str:
         """
         Route the request to a specific instance based on the request stats.
         It can also be based on engine stats in the future.
@@ -25,7 +25,7 @@ class RoutingInterface:
 
 
 class RandomRouter(RoutingInterface):
-    def route_request(self, endpoints: list[int], request_stats: dict) -> int:
+    def route_request(self, endpoints: list[str], request_stats: dict) -> str:
         if not endpoints:
             raise RuntimeError("No healthy endpoints available for routing.")
         return random.choice(endpoints)
@@ -35,7 +35,7 @@ class RoundRobinRouter(RoutingInterface):
     def __init__(self):
         self.current_index = 0
 
-    def route_request(self, endpoints: list[int], request_stats: dict) -> int:
+    def route_request(self, endpoints: list[str], request_stats: dict) -> str:
         if not endpoints:
             raise RuntimeError("No healthy endpoints available for routing.")
         selected_index = self.current_index % len(endpoints)
@@ -44,12 +44,12 @@ class RoundRobinRouter(RoutingInterface):
 
 
 class LeastInFlightRouter(RoutingInterface):
-    def route_request(self, endpoints: list[int], request_stats: dict) -> int:
+    def route_request(self, endpoints: list[str], request_stats: dict) -> str:
         if not endpoints:
             raise RuntimeError("No healthy endpoints available for routing.")
 
-        def get_in_flight_count(endpoint_id: int) -> int:
-            stats: RequestStats | None = request_stats.get(endpoint_id)
+        def get_in_flight_count(endpoint: str) -> int:
+            stats: RequestStats | None = request_stats.get(endpoint)
             return len(stats.in_flight_requests) if stats else 0
 
         return min(endpoints, key=get_in_flight_count)
