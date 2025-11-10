@@ -17,6 +17,8 @@ from vllm.outputs import RequestOutput
 
 class ServerType(Enum):
     E_INSTANCE = auto()
+    P_INSTANCE = auto()
+    D_INSTANCE = auto()
     PD_INSTANCE = auto()
 
 
@@ -24,8 +26,10 @@ class RequestType:
     GENERATION = b"\x00"
     ABORT = b"\x01"
     ENCODE = b"\x02"
-    HEARTBEAT = b"\x03"
-    METRICS = b"\x04"
+    PREFILL = b"\x03"
+    DECODE = b"\x04"
+    HEARTBEAT = b"\x05"
+    METRICS = b"\x06"
 
 
 class PDAbortRequest(msgspec.Struct):
@@ -36,8 +40,10 @@ class ResponseType:
     GENERATION = b"\x00"
     FAILURE = b"\x01"
     ENCODE = b"\x02"
-    HEARTBEAT = b"\x03"
-    METRICS = b"\x04"
+    PREFILL = b"\x03"
+    DECODE = b"\x04"
+    HEARTBEAT = b"\x05"
+    METRICS = b"\x06"
 
 
 class GenerationResponse(msgspec.Struct):
@@ -95,3 +101,35 @@ class MetricsRequest(msgspec.Struct):
 class MetricsResponse(msgspec.Struct):
     request_id: str
     metrics: Optional[dict[int, dict[str, Union[int, float]]]]
+
+
+SERVER_ROUTE_MAP = {
+    ServerType.E_INSTANCE: {
+        "addr_key": "encode_addr_list",
+        "router_key": "encode_router",
+        "worker_key": "encode",
+        "request_type": RequestType.ENCODE,
+        "expect_stream": False,
+    },
+    ServerType.P_INSTANCE: {
+        "addr_key": "prefill_addr_list",
+        "router_key": "prefill_router",
+        "worker_key": "prefill",
+        "request_type": RequestType.PREFILL,
+        "expect_stream": False,
+    },
+    ServerType.D_INSTANCE: {
+        "addr_key": "decode_addr_list",
+        "router_key": "decode_router",
+        "worker_key": "decode",
+        "request_type": RequestType.DECODE,
+        "expect_stream": True,
+    },
+    ServerType.PD_INSTANCE: {
+        "addr_key": "pd_addr_list",
+        "router_key": "pd_router",
+        "worker_key": "pd",
+        "request_type": RequestType.GENERATION,
+        "expect_stream": True,
+    },
+}

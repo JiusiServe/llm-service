@@ -91,6 +91,13 @@ class DisaggWorker:
             gen_req = self.decoder_generate.decode(req_data)
             gen_req.sampling_params.max_tokens = 1
             await self._encode_handler(gen_req)
+        elif req_type == RequestType.PREFILL:
+            gen_req = self.decoder_generate.prefill(req_data)
+            gen_req.sampling_params.max_tokens = 1
+            await self._prefill_handler(gen_req)
+        elif req_type == RequestType.DECODE:
+            gen_req = self.decoder_generate.decode(req_data)
+            await self._generation_handler(gen_req)
         elif req_type == RequestType.GENERATION:
             gen_req = self.decoder_generate.decode(req_data)
             await self._generation_handler(gen_req)
