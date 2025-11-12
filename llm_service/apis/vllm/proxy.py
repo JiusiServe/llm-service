@@ -26,6 +26,7 @@ from llm_service.protocol.protocol import (
     RequestType,
     ResponseType,
     ServerType,
+    SERVER_ROUTE_MAP,
 )
 from llm_service.request_stats import RequestStatsMonitor
 from llm_service.routing_logic import RandomRouter, RoutingInterface
@@ -47,6 +48,21 @@ from llm_service.logger_utils import init_logger
 logger = init_logger(__name__)
 
 
+class InstanceGroup:
+    """Encapsulates per-server-type runtime components."""
+
+    def __init__(
+        self, sockets, service_discovery, stats_monitor, router, metrics_logger
+    ):
+        self.sockets = sockets
+        self.service_discovery = service_discovery
+        self.stats_monitor = stats_monitor
+        self.router = router
+        self.metrics_logger = metrics_logger
+        self.time_count: dict[int, int] = defaultdict(int)
+        self.time_total: dict[int, float] = defaultdict(float)
+
+
 class Proxy(EngineClient):
     """
     Proxy
@@ -56,72 +72,59 @@ class Proxy(EngineClient):
         self,
         proxy_addr: str,
         encode_addr_list: list[str],
-        pd_addr_list: list[str],
         model_name: str,
-        router: type[RoutingInterface] = RandomRouter,
+        encode_router: type[RoutingInterface] = RandomRouter,
+        pd_addr_list: Optional[list[str]] = None,
+        pd_router: type[RoutingInterface] = RandomRouter,
+        prefill_addr_list: Optional[list[str]] = None,
+        prefill_router: type[RoutingInterface] = RandomRouter,
+        decode_addr_list: Optional[list[str]] = None,
+        decode_router: type[RoutingInterface] = RandomRouter,
         enable_health_monitor=True,
         health_check_interval=10,
         health_threshold=3,
     ):
-        self.queues: dict[str, asyncio.Queue] = {}
+        init_params = locals()
 
+        self.queues: dict[str, asyncio.Queue] = {}
         self.encoder = msgspec.msgpack.Encoder()
+        self.instances: dict[ServerType, InstanceGroup] = {}
+
+        # Now only support P-D merged and P-D disaggregated circumstances.
+        # Validate the input addresses.
+        self.is_pd_merged = False
+        if prefill_addr_list is not None and decode_addr_list is not None:
+            if pd_addr_list is not None:
+                raise ValueError(
+                    "Invalid input: pd_addr_list should be None when both"
+                    "prefill_addr_list and decode_addr_list are provided."
+                )
+        elif (
+            prefill_addr_list is None
+            and decode_addr_list is None
+            and pd_addr_list is not None
+        ):
+            self.is_pd_merged = True
+        else:
+            raise ValueError(
+                "Invalid input: either both prefill_addr_list"
+                "and decode_addr_list should be provided,"
+            )
 
         self.ctx = zmq.asyncio.Context()
         self.proxy_addr = f"ipc://{proxy_addr}"
-        self.encode_addr_list = [f"ipc://{addr}" for addr in encode_addr_list]
-        self.pd_addr_list = [f"ipc://{addr}" for addr in pd_addr_list]
-        self.to_encode_sockets = []
-        for addr in self.encode_addr_list:
-            socket = self.ctx.socket(zmq.constants.PUSH)
-            socket.connect(addr)
-            self.to_encode_sockets.append(socket)
-        self.to_pd_sockets = []
-        for addr in self.pd_addr_list:
-            socket = self.ctx.socket(zmq.constants.PUSH)
-            socket.connect(addr)
-            self.to_pd_sockets.append(socket)
-
-        self.enable_health_monitor = enable_health_monitor
-        self.health_check_interval = health_check_interval
-        self.health_threshold = health_threshold
-        self.encode_service_discovery = HealthCheckServiceDiscovery(
-            server_type=ServerType.E_INSTANCE,
-            instances=list(range(len(self.encode_addr_list))),
-            enable_health_monitor=self.enable_health_monitor,
-            health_check_interval=self.health_check_interval,
-            health_threshold=self.health_threshold,
-            health_check_func=self.check_health,
-        )
-
-        self.pd_service_discovery = HealthCheckServiceDiscovery(
-            server_type=ServerType.PD_INSTANCE,
-            instances=list(range(len(self.pd_addr_list))),
-            enable_health_monitor=self.enable_health_monitor,
-            health_check_interval=self.health_check_interval,
-            health_threshold=self.health_threshold,
-            health_check_func=self.check_health,
-        )
-        self.pd_metrics_logger = MetricsReporter(
-            server_type=ServerType.PD_INSTANCE,
-            instances=list(range(len(self.pd_addr_list))),
-            addr=self.pd_addr_list,
-            get_metrics_func=self.get_metrics,
-        )
-        self.encoder_metrics_logger = MetricsReporter(
-            server_type=ServerType.E_INSTANCE,
-            instances=list(range(len(self.encode_addr_list))),
-            addr=self.encode_addr_list,
-            get_metrics_func=self.get_metrics,
-        )
-        self.encode_request_stats_monitor = RequestStatsMonitor(
-            list(range(len(self.encode_addr_list)))
-        )
-        self.pd_request_stats_monitor = RequestStatsMonitor(
-            list(range(len(self.pd_addr_list)))
-        )
-        self.encode_router = router()
-        self.pd_router = router()
+        for server_type, key_map in SERVER_ROUTE_MAP:
+            addr_list = init_params.get(key_map["addr_key"])
+            router = init_params.get(key_map["router_key"])
+            if addr_list is not None:
+                self._init_instance_group(
+                    server_type,
+                    addr_list,
+                    router,
+                    enable_health_monitor,
+                    health_check_interval,
+                    health_threshold,
+                )
 
         self.output_handler: Optional[asyncio.Task] = None
 
@@ -135,133 +138,165 @@ class Proxy(EngineClient):
             task="generate",
             seed=42,
         )
-        self.proxy_to_pd_time_count: defaultdict[int, int] = defaultdict(int)
-        self.proxy_to_pd_time_total: defaultdict[int, float] = defaultdict(
-            float
+
+    def _init_instance_group(
+        self,
+        server_type: ServerType,
+        addr_list: list[str],
+        router_cls: type[RoutingInterface],
+        enable_health_monitor,
+        health_check_interval,
+        health_threshold,
+    ):
+        ipc_addrs = [f"ipc://{addr}" for addr in addr_list]
+        sockets = []
+        for addr in ipc_addrs:
+            s = self.ctx.socket(zmq.constants.PUSH)
+            s.connect(addr)
+            sockets.append(s)
+
+        service_discovery = HealthCheckServiceDiscovery(
+            server_type=server_type,
+            instances=list(range(len(ipc_addrs))),
+            enable_health_monitor=self.enable_health_monitor,
+            health_check_interval=self.health_check_interval,
+            health_threshold=self.health_threshold,
+            health_check_func=self.check_health,
         )
-        self.proxy_to_encode_time_count: defaultdict[int, int] = defaultdict(
-            int
+
+        stats_monitor = RequestStatsMonitor(list(range(len(ipc_addrs))))
+        router = router_cls()
+        metrics_logger = MetricsReporter(
+            server_type=server_type,
+            instances=list(range(len(ipc_addrs))),
+            addr=ipc_addrs,
+            get_metrics_func=self.get_metrics,
         )
-        self.proxy_to_encode_time_total: defaultdict[int, float] = defaultdict(
-            float
+
+        self.instances[server_type] = InstanceGroup(
+            sockets, service_discovery, stats_monitor, router, metrics_logger
         )
+
+    async def _send_request(
+        self,
+        server_type: ServerType,
+        request_type: RequestType,
+        request: Any,
+        q: asyncio.Queue,
+        expect_stream: bool = False,
+    ):
+        """统一处理 encode / PD / P / D 的发送逻辑，支持流式和非流式"""
+        group = self.instances[server_type]
+        if not group.sockets:
+            raise RuntimeError(f"No {server_type.name} workers configured.")
+
+        # 序列化请求
+        try:
+            payload = self.encoder.encode(request)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to serialize {request_type.name}"
+            ) from e
+
+        msg = (request_type, payload)
+        health_endpoints = group.service_discovery.get_health_endpoints()
+        request_stats = group.stats_monitor.get_request_stats()
+        idx = group.router.route_request(health_endpoints, request_stats)
+        group.stats_monitor.on_new_request(idx, request_id=request.request_id)
+
+        socket = group.sockets[idx]
+        start_time = (
+            time.perf_counter() if llm_service_envs.TIMECOUNT_ENABLED else None
+        )
+
+        await socket.send_multipart(msg, copy=False)
+
+        async def handle_response(resp):
+            if isinstance(resp, Exception):
+                raise resp
+            # 使用 InstanceGroup 属性记录时间
+            if (
+                llm_service_envs.TIMECOUNT_ENABLED
+                and isinstance(resp, GenerationResponse)
+                and getattr(resp, "proxy_to_worker_time_end", None)
+            ):
+                key = (server_type, idx)
+                group.proxy_to_time_count[key] = (
+                    group.proxy_to_time_count.get(key, 0) + 1
+                )
+                group.proxy_to_time_total[key] = group.proxy_to_time_total.get(
+                    key, 0.0
+                ) + (resp.proxy_to_worker_time_end - start_time)
+            return resp
+
+        try:
+            if expect_stream:
+                # 流式返回
+                finished = False
+                while not finished:
+                    resp = await q.get()
+                    resp = await handle_response(resp)
+                    finished = getattr(resp, "finish_reason", None) is not None
+                    yield resp
+            else:
+                # 非流式返回（Prefill）
+                resp = await q.get()
+                resp = await handle_response(resp)
+                return resp
+        finally:
+            group.stats_monitor.on_request_completed(
+                idx, request_id=request.request_id
+            )
+
+            if isinstance(resp, Exception):
+                raise resp
+                # 使用 InstanceGroup 属性记录时间
+            if (
+                llm_service_envs.TIMECOUNT_ENABLED
+                and isinstance(resp, GenerationResponse)
+                and getattr(resp, "proxy_to_worker_time_end", None)
+            ):
+                key = (server_type, idx)
+                group.proxy_to_time_count[key] = (
+                    group.proxy_to_time_count.get(key, 0) + 1
+                )
+                group.proxy_to_time_total[key] = group.proxy_to_time_total.get(
+                    key, 0.0
+                ) + (resp.proxy_to_worker_time_end - start_time)
+                return resp
+
+            try:
+                if expect_stream:
+                    # 流式返回
+                    finished = False
+                    while not finished:
+                        resp = await q.get()
+                        resp = await handle_response(resp)
+                        finished = (
+                            getattr(resp, "finish_reason", None) is not None
+                        )
+                        yield resp
+                else:
+                    # 非流式返回（Prefill）
+                    resp = await q.get()
+                    resp = await handle_response(resp)
+                    return resp
+            finally:
+                group.stats_monitor.on_request_completed(
+                    idx, request_id=request.request_id
+                )
 
     def shutdown(self):
         self.ctx.destroy()
         if (task := self.output_handler) is not None:
             task.cancel()
-
         socket_path = self.proxy_addr.replace("ipc://", "")
         if os.path.exists(socket_path):
             os.remove(socket_path)
 
-    async def log_metrics(self) -> None:
-        await self.pd_metrics_logger.get_metrics()
-        await self.encoder_metrics_logger.get_metrics()
-
-    async def _run_encode(
-        self,
-        request: GenerationRequest,
-        q: asyncio.Queue[Union[Exception, GenerationResponse]],
-    ) -> None:
-        """
-        Send the encode request to one encoder worker.
-        The encoder worker is selected based on hashing the request ID.
-        """
-        if not self.to_encode_sockets:
-            raise RuntimeError(
-                "No encode workers configured: encode_addr_list is empty."
-            )
-
-        try:
-            payload = self.encoder.encode(request)
-        except Exception as e:
-            raise RuntimeError("Failed to serialize GenerationRequest") from e
-
-        msg = (RequestType.ENCODE, payload)
-        health_endpoints = self.encode_service_discovery.get_health_endpoints()
-        request_stats = self.encode_request_stats_monitor.get_request_stats()
-        idx = self.encode_router.route_request(health_endpoints, request_stats)
-        self.encode_request_stats_monitor.on_new_request(
-            idx, request_id=request.request_id
-        )
-        try:
-            socket = self.to_encode_sockets[idx]
-            if llm_service_envs.TIMECOUNT_ENABLED:
-                proxy_to_encode_time_start = time.perf_counter()
-            await socket.send_multipart(msg, copy=False)
-            response = await q.get()
-            if (
-                llm_service_envs.TIMECOUNT_ENABLED
-                and isinstance(response, GenerationResponse)
-                and response.proxy_to_worker_time_end
-            ):
-                self.proxy_to_encode_time_count[idx] += 1
-                self.proxy_to_encode_time_total[idx] += (
-                    response.proxy_to_worker_time_end
-                    - proxy_to_encode_time_start  # type: ignore
-                )
-
-            if isinstance(response, Exception):
-                raise response
-        finally:
-            self.encode_request_stats_monitor.on_request_completed(
-                idx, request_id=request.request_id
-            )
-
-    async def _run_pd(
-        self,
-        request: GenerationRequest,
-        q: asyncio.Queue[Union[Exception, GenerationResponse]],
-    ):
-        """
-        Send the generation request to a PD worker and yield its response.
-        The PD worker is selected based on hashing the request ID.
-        """
-        if not self.to_pd_sockets:
-            raise RuntimeError(
-                "No PD workers configured: pd_addr_list is empty."
-            )
-
-        try:
-            payload = self.encoder.encode(request)
-        except Exception as e:
-            raise RuntimeError("Failed to serialize GenerationRequest") from e
-
-        msg = (RequestType.GENERATION, payload)
-        health_endpoints = self.pd_service_discovery.get_health_endpoints()
-        request_stats = self.pd_request_stats_monitor.get_request_stats()
-        idx = self.pd_router.route_request(health_endpoints, request_stats)
-        self.pd_request_stats_monitor.on_new_request(
-            idx, request_id=request.request_id
-        )
-
-        try:
-            socket = self.to_pd_sockets[idx]
-            if llm_service_envs.TIMECOUNT_ENABLED:
-                proxy_to_pd_time_start = time.perf_counter()
-            await socket.send_multipart(msg, copy=False)
-            finished = False
-            while not finished:
-                response = await q.get()
-                if isinstance(response, Exception):
-                    raise response
-                if (
-                    llm_service_envs.TIMECOUNT_ENABLED
-                    and isinstance(response, GenerationResponse)
-                    and response.proxy_to_worker_time_end
-                ):
-                    self.proxy_to_pd_time_count[idx] += 1
-                    self.proxy_to_pd_time_total[idx] += (
-                        response.proxy_to_worker_time_end
-                        - proxy_to_pd_time_start  # type: ignore
-                    )
-                finished = response.finish_reason is not None
-                yield response
-        finally:
-            self.pd_request_stats_monitor.on_request_completed(
-                idx, request_id=request.request_id
-            )
+    async def log_metrics(self):
+        for group in self.instances.values():
+            await group.metrics_logger.get_metrics()
 
     def _to_request_output(self, resp: GenerationResponse) -> RequestOutput:
         """Convert a PD/Generate response to vLLM RequestOutput.
@@ -291,57 +326,72 @@ class Proxy(EngineClient):
             finished=resp.finish_reason is not None,
         )
 
+    async def _run_worker(
+        self, server_type: ServerType, request: Any, q: asyncio.Queue
+    ):
+        """统一执行不同 server_type 的 worker"""
+        cfg = SERVER_ROUTE_MAP[server_type]
+        expect_stream = cfg["expect_stream"]
+        request_type = cfg["request_type"]
+
+        if expect_stream:
+            async for resp in self._send_request(
+                server_type, request_type, request, q, expect_stream=True
+            ):
+                yield resp
+        else:
+            # 非流式，Prefill阶段
+            await self._send_request(
+                server_type, request_type, request, q, expect_stream=False
+            )
+
     async def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
     ):
-        # lazy initialization
+        # lazy init output handler
         if self.output_handler is None:
             self.output_handler = asyncio.create_task(
                 self._run_output_handler()
             )
-        if self.encode_service_discovery.should_launch_health_monitor():
-            self.encode_service_discovery.launch_health_monitor()
-        if self.pd_service_discovery.should_launch_health_monitor():
-            self.pd_service_discovery.launch_health_monitor()
 
-        if not request_id:
-            request_id = uuid.uuid4().hex
-
+        request_id = request_id or uuid.uuid4().hex
         q: asyncio.Queue = asyncio.Queue()
         if request_id in self.queues:
             raise ValueError(f"Request id {request_id} already running.")
-        else:
-            self.queues[request_id] = q
+        self.queues[request_id] = q
 
-        # Support both raw string prompts and dict prompts with multimodal data
         prompt_text = prompt["prompt"] if isinstance(prompt, dict) else prompt
-
+        multi_modal_data = (
+            prompt.get("multi_modal_data") if isinstance(prompt, dict) else None
+        )
         request = GenerationRequest(
             request_id=request_id,
             prompt=prompt_text,
             sampling_params=sampling_params,
+            multi_modal_data=multi_modal_data,
         )
 
         try:
-            # need to validate to avoid decode failed later
             req_dict = msgspec.to_builtins(request)
             request = msgspec.convert(req_dict, GenerationRequest, strict=True)
+            if multi_modal_data:
+                request.multi_modal_data = _encode_mm_data(multi_modal_data)
+                await self._run_worker(ServerType.E_INSTANCE, request, q)
+            if self.is_pd_merged:
+                async for pd_response in self._run_worker(
+                    ServerType.PD_INSTANCE, request, q
+                ):
+                    yield self._to_request_output(pd_response)
+            else:
+                await self._run_worker(ServerType.P_INSTANCE, request, q)
+                async for d_response in self._run_worker(
+                    ServerType.D_INSTANCE, request, q
+                ):
+                    yield self._to_request_output(d_response)
 
-            if _has_mm_data(prompt):
-                request.multi_modal_data = _encode_mm_data(
-                    prompt["multi_modal_data"]
-                )
-                await self._run_encode(request, q)
-
-            # TODO: support pd separation
-            async for pd_response in self._run_pd(request, q):
-                yield self._to_request_output(pd_response)
         except msgspec.ValidationError as e:
             raise RuntimeError(f"Invalid Parameters: {e}.") from e
         finally:
@@ -498,94 +548,45 @@ class Proxy(EngineClient):
         pass
 
     async def check_health(self, server_type: ServerType, id: int):
-        # lazy initialization
-        if self.output_handler is None:
-            self.output_handler = asyncio.create_task(
-                self._run_output_handler()
-            )
         request_id = str(uuid.uuid4())
-        request = HeartbeatRequest(request_id=request_id)
-        q: asyncio.Queue = asyncio.Queue()
+        q = asyncio.Queue()
         self.queues[request_id] = q
         try:
-            payload = self.encoder.encode(request)
-            msg = (RequestType.HEARTBEAT, payload)
-            if server_type == ServerType.PD_INSTANCE:
-                socket = self.to_pd_sockets[id]
-            else:
-                socket = self.to_encode_sockets[id]
-
-            await socket.send_multipart(msg, copy=False)
-            response = await q.get()
-            if (
-                isinstance(response, HeartbeatResponse)
-                and response.status == "OK"
-            ):
-                return True
-            elif isinstance(response, Exception):
-                raise response
-            else:
-                return False
-
-        except Exception as e:
-            raise RuntimeError(
-                f"Health check failed for {server_type} {id}, exception: {e}"
-            ) from e
+            req = HeartbeatRequest(request_id=request_id)
+            resp = await self._send_request(
+                server_type, RequestType.HEARTBEAT, req, q, expect_stream=False
+            )
+            return isinstance(resp, HeartbeatResponse) and resp.status == "OK"
         finally:
             self.queues.pop(request_id, None)
 
     async def get_metrics(self, server_type: ServerType, id: int):
         request_id = str(uuid.uuid4())
-        request = MetricsRequest(request_id=request_id)
-        q: asyncio.Queue = asyncio.Queue()
+        q = asyncio.Queue()
         self.queues[request_id] = q
         try:
-            payload = self.encoder.encode(request)
-            msg = (RequestType.METRICS, payload)
-            if server_type == ServerType.PD_INSTANCE:
-                socket = self.to_pd_sockets[id]
-            else:
-                socket = self.to_encode_sockets[id]
-
-            await socket.send_multipart(msg, copy=False)
-            response = await q.get()
-            # calculate proxy to pd/encode time
-            if (
-                isinstance(response, MetricsResponse)
-                and response.metrics is not None
+            req = MetricsRequest(request_id=request_id)
+            async for resp in self._send_request(
+                server_type, RequestType.METRICS, req, q, expect_stream=False
             ):
-                # calculate proxy to pd/encode time average
-                # add to metrics
-                proxy2pd_avg = (
-                    self.proxy_to_pd_time_total[id]
-                    / self.proxy_to_pd_time_count[id]
-                    if self.proxy_to_pd_time_count[id] > 0
-                    else 0.0
-                )
-                proxy2encode_avg = (
-                    self.proxy_to_encode_time_total[id]
-                    / self.proxy_to_encode_time_count[id]
-                    if self.proxy_to_encode_time_count[id] > 0
-                    else 0.0
-                )
-                for engine_id in response.metrics:
-                    response.metrics[engine_id].update(
-                        {
-                            "proxy_to_pd_time_avg": proxy2pd_avg,
-                            "proxy_to_encode_time_avg": proxy2encode_avg,
-                        }
-                    )
-                return response.metrics
-            elif isinstance(response, Exception):
-                raise response
-            else:
+                if (
+                    isinstance(resp, MetricsResponse)
+                    and resp.metrics is not None
+                ):
+                    key = (server_type, id)
+                    cnt = self.proxy_to_time_count[key]
+                    total = self.proxy_to_time_total[key]
+                    avg = total / cnt if cnt > 0 else 0.0
+                    for engine_id in resp.metrics:
+                        resp.metrics[engine_id].update(
+                            {
+                                f"proxy_to_{server_type.name.lower()}_time_avg": avg
+                            }
+                        )
+                    return resp.metrics
+                elif isinstance(resp, Exception):
+                    raise resp
                 return None
-
-        except Exception as e:
-            raise RuntimeError(
-                "Get metrics failed for %s %s, exception: %s"
-                % (server_type, id, e)
-            ) from e
         finally:
             self.queues.pop(request_id, None)
 
