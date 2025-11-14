@@ -150,10 +150,16 @@ class DisaggWorker:
         self.engine.abort(request_id=req.request_id)
 
     async def _heartbeat_handler(self, req: HeartbeatRequest):
+        try:
+            self.engine.check_health()
+            status = "OK"
+        except Exception:
+            status = "FAIL"
+            logger.exception("Check health Failed.")
         msg = (
             ResponseType.HEARTBEAT,
             self.encoder.encode(
-                HeartbeatResponse(request_id=req.request_id, status="OK")
+                HeartbeatResponse(request_id=req.request_id, status=status)
             ),
         )
         await self._handle_response(req, msg)
