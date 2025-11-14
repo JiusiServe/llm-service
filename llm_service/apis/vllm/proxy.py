@@ -109,7 +109,8 @@ class Proxy(EngineClient):
             self.is_pd_merged = True
         else:
             raise ValueError(
-                "Invalid input: Input combinations are incorrect, please check the documentation."
+                "Invalid input: Either provide both p_addr_list and d_addr_list (for disaggregated mode), "
+                "or provide pd_addr_list only (for merged mode), but not a mix of both."
             )
 
         # init p-d(or pd) connections
