@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import uuid
 
+from llm_service.protocol.protocol import ServerType
 import numpy as np
 from PIL import Image
 
@@ -90,7 +91,17 @@ async def main():
         if llm_service_envs.TIMECOUNT_ENABLED:
             # wait for logging
             await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
-            await p.log_metrics()
+            asyncio.create_task(p.log_metrics())
+        # test for exit_instance
+        exit_task = asyncio.create_task(
+            asyncio.wait_for(
+                p.exit_instance(
+                    ServerType.PD_INSTANCE, addr="/tmp/prefill_decode_0"
+                ),
+                timeout=llm_service_envs.WORKER_DRAINING_TIMEOUT,
+            )
+        )
+        await exit_task
     finally:
         p.shutdown()
 

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import uuid
 
+from llm_service.protocol.protocol import ServerType
 import numpy as np
 from PIL import Image
 
@@ -95,6 +96,16 @@ async def run_single_proxy(proxy_addr):
             # wait for logging
             await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
             await p.log_metrics()
+        # test for exit_instance
+        exit_task = asyncio.create_task(
+            asyncio.wait_for(
+                p.exit_instance(
+                    ServerType.PD_INSTANCE, addr="/tmp/prefill_decode_0"
+                ),
+                timeout=llm_service_envs.WORKER_DRAINING_TIMEOUT,
+            )
+        )
+        await exit_task
     finally:
         p.shutdown()
 

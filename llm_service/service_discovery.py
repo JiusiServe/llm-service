@@ -148,3 +148,15 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
         self._cached_unhealth_instances = [
             iid for iid, healthy in self._instances.items() if not healthy
         ]
+
+    def remove_instance(self, iid: int):
+        if iid in self._instances:
+            del self._instances[iid]
+            del self._succ_count[iid]
+            del self._fail_count[iid]
+            logger.info(
+                "Instance %s %s removed from service discovery.",
+                self.server_type,
+                iid,
+            )
+            self._update_health_status()

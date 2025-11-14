@@ -26,6 +26,7 @@ class RequestType:
     ENCODE = b"\x02"
     HEARTBEAT = b"\x03"
     METRICS = b"\x04"
+    EXIT = b"\x05"
 
 
 class PDAbortRequest(msgspec.Struct):
@@ -38,6 +39,7 @@ class ResponseType:
     ENCODE = b"\x02"
     HEARTBEAT = b"\x03"
     METRICS = b"\x04"
+    SIGTERM = b"\x06"
 
 
 class GenerationResponse(msgspec.Struct):
@@ -98,3 +100,16 @@ class MetricsRequest(msgspec.Struct):
 class MetricsResponse(msgspec.Struct):
     request_id: str
     metrics: Optional[dict[int, dict[str, Union[int, float]]]]
+
+
+class ExitRequest(msgspec.Struct):
+    request_id: str
+    reason: str = "user_exit"
+
+
+class ShutdownRequest(msgspec.Struct):
+    request_id: str
+    addr: str
+    server_type: ServerType
+    in_flight: int
+    reason: str
