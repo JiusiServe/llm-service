@@ -39,7 +39,7 @@ class DisaggWorker:
         self,
         engine: EngineClient,
         address: str,
-        proxy_addr: str,
+        proxy_addr: str | list[str],
         transfer_protocol: Optional[str] = None,
     ):
         self.engine = engine
@@ -47,17 +47,22 @@ class DisaggWorker:
             llm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.worker_addr = f"{self.transfer_protocol}://{address}"
-        self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
+        self.proxy_addr_list = [
+            f"{self.transfer_protocol}://{addr}" for addr in proxy_addr
+        ]
         self.ctx = zmq.asyncio.Context()
         ipv6_pattern = r"^\[(.*?)\]:(\d+)$"
         if re.match(ipv6_pattern, address) and self.transfer_protocol == "tcp":
             self.ctx.setsockopt(zmq.constants.IPV6, 1)
         self.from_proxy = self.ctx.socket(zmq.constants.PULL)
         self.from_proxy.bind(self.worker_addr)
-        self.to_proxy = self.ctx.socket(zmq.constants.PUSH)
-        self.to_proxy.connect(self.proxy_addr)
+        self.to_proxy: dict[str, zmq.asyncio.Socket] = {}
+        for addr in self.proxy_addr_list:
+            socket = self.ctx.socket(zmq.constants.PUSH)
+            socket.connect(addr)
+            self.to_proxy[addr] = socket
         logger.info(
-            f"Worker address: {self.worker_addr}, proxy_addr: {self.proxy_addr}"
+            f"Worker address: {self.worker_addr}, proxy_addr: {self.proxy_addr_list}"
         )
         self.decoder_generate = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
@@ -128,7 +133,16 @@ class DisaggWorker:
         )
         self.running_requests.add(task)
         task.add_done_callback(self.running_requests.discard)
-        
+
+    async def _handle_response(self, req, msg):
+        if req.proxy_addr not in self.to_proxy:
+            logger.error(
+                f"request {req.request_id} could not find proxy address {req.proxy_addr}."
+            )
+            return
+
+        await self.to_proxy[req.proxy_addr].send_multipart(msg, copy=False)
+
     async def _encode_handler(self, req: GenerationRequest):
         task = asyncio.create_task(
             self._generate(req, lambda b: (ResponseType.ENCODE, b))
@@ -153,7 +167,7 @@ class DisaggWorker:
                 HeartbeatResponse(request_id=req.request_id, status="OK")
             ),
         )
-        await self.to_proxy.send_multipart(msg, copy=False)
+        await self._handle_response(req, msg)
 
     async def _metrics_handler(self, req: MetricsRequest):
         stats_logger: Optional[dict[int, dict[str, Union[int, float]]]] = (
@@ -165,7 +179,7 @@ class DisaggWorker:
                 MetricsResponse(request_id=req.request_id, metrics=stats_logger)
             ),
         )
-        await self.to_proxy.send_multipart(msg, copy=False)
+        await self._handle_response(req, msg)
 
     async def _generate(
         self,
@@ -199,7 +213,7 @@ class DisaggWorker:
                     first_token_flag = False
                 response_bytes = self.encoder.encode(response)
                 msg = make_msg_func(response_bytes)
-                await self.to_proxy.send_multipart(msg, copy=False)
+                await self._handle_response(req, msg)
         except Exception as e:
             logger.exception("Generation failed for request %s", request_id)
             failure_resp = FailureResponse(
@@ -207,7 +221,7 @@ class DisaggWorker:
             )
             response_bytes = self.encoder.encode(failure_resp)
             msg = (ResponseType.FAILURE, response_bytes)
-            await self.to_proxy.send_multipart(msg, copy=False)
+            await self._handle_response(req, msg)
 
 
 def _decode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:

@@ -29,7 +29,12 @@ from llm_service.protocol.protocol import (
     ServerType,
 )
 from llm_service.request_stats import RequestStatsMonitor
-from llm_service.routing_logic import RandomRouter, RoundRobinRouter, LeastInFlightRouter, RoutingInterface
+from llm_service.routing_logic import (
+    RoutingInterface,
+    RandomRouter,
+    RoundRobinRouter,
+    LeastInFlightRouter,
+)
 from llm_service.service_discovery import HealthCheckServiceDiscovery
 from llm_service.stats_loggers import MetricsReporter
 
@@ -52,29 +57,26 @@ ROUTER_MAP = {
     "RoundRobinRouter": RoundRobinRouter,
     "LeastInFlightRouter": LeastInFlightRouter,
 }
-    
-    
+
+
 class Proxy(EngineClient):
     """
     Proxy
     """
-    # TODO : router 需要从环境变量获取
+
     def __init__(
         self,
         proxy_addr: str,
         encode_addr_list: list[str],
-        model_name: str,
         pd_addr_list: Optional[list[str]] = None,
-        p_addr_list: Optional[list[str]] = None,
-        d_addr_list: Optional[list[str]] = None,
-        # encode_router: type[RoutingInterface] = RandomRouter,
-        # pd_router: type[RoutingInterface] = RandomRouter,
-        # p_router: type[RoutingInterface] = RandomRouter,
-        # d_router: type[RoutingInterface] = RandomRouter,
+        model_name: str = "",
+        router: type[RoutingInterface] = RandomRouter,
         enable_health_monitor=True,
         health_check_interval=10,
         health_threshold=3,
         transfer_protocol=None,
+        p_addr_list: Optional[list[str]] = None,
+        d_addr_list: Optional[list[str]] = None,
     ):
         self.queues: dict[str, asyncio.Queue] = {}
 
@@ -98,7 +100,8 @@ class Proxy(EngineClient):
         self.enable_health_monitor = enable_health_monitor
         self.health_check_interval = health_check_interval
         self.health_threshold = health_threshold
-        
+
+        self.is_pd_merged = False
         # Judge whether pd merged or not
         if (p_addr_list and d_addr_list and not pd_addr_list) or (
             not p_addr_list and not d_addr_list and pd_addr_list
@@ -109,19 +112,20 @@ class Proxy(EngineClient):
             raise ValueError(
                 "Invalid input: Input combinations are incorrect, please check the documentation."
             )
-        
+
         # init p-d(or pd) connections
-        if self.is_pd_merged:    
+        if self.is_pd_merged:
             self.pd_addr_list = [
-                f"{self.transfer_protocol}://{addr}" for addr in pd_addr_list
+                f"{self.transfer_protocol}://{addr}"
+                for addr in (pd_addr_list or [])
             ]
-            
+
             self.to_pd_sockets = []
             for addr in self.pd_addr_list:
                 socket = self.ctx.socket(zmq.constants.PUSH)
                 socket.connect(addr)
                 self.to_pd_sockets.append(socket)
-            
+
             self.pd_service_discovery = HealthCheckServiceDiscovery(
                 server_type=ServerType.PD_INSTANCE,
                 instances=list(range(len(self.pd_addr_list))),
@@ -138,20 +142,28 @@ class Proxy(EngineClient):
             )
             self.pd_request_stats_monitor = RequestStatsMonitor(
                 list(range(len(self.pd_addr_list)))
-            self.pd_router = ROUTER_MAP.get(llm_service_envs.PREFILL_ROUTER, RandomRouter)()
-            self.proxy_to_pd_time_count: defaultdict[int, int] = defaultdict(int)
+            )
+            self.pd_router = (
+                ROUTER_MAP.get(llm_service_envs.LM_SERVICE_PD_ROUTER) or router
+            )()
+            self.proxy_to_pd_time_count: defaultdict[int, int] = defaultdict(
+                int
+            )
             self.proxy_to_pd_time_total: defaultdict[int, float] = defaultdict(
                 float
             )
-        )
         else:
             self.p_addr_list = [
-                f"{self.transfer_protocol}://{addr}" for addr in p_addr_list
+                f"{self.transfer_protocol}://{addr}"
+                for addr in (p_addr_list or [])
             ]
             self.d_addr_list = [
-                f"{self.transfer_protocol}://{addr}" for addr in d_addr_list
+                f"{self.transfer_protocol}://{addr}"
+                for addr in (d_addr_list or [])
             ]
 
+            self.to_p_sockets = []
+            self.to_d_sockets = []
             for addr in self.p_addr_list:
                 socket = self.ctx.socket(zmq.constants.PUSH)
                 socket.connect(addr)
@@ -161,7 +173,7 @@ class Proxy(EngineClient):
                 socket = self.ctx.socket(zmq.constants.PUSH)
                 socket.connect(addr)
                 self.to_d_sockets.append(socket)
-            
+
             self.p_service_discovery = HealthCheckServiceDiscovery(
                 server_type=ServerType.P_INSTANCE,
                 instances=list(range(len(self.p_addr_list))),
@@ -170,7 +182,7 @@ class Proxy(EngineClient):
                 health_threshold=self.health_threshold,
                 health_check_func=self.check_health,
             )
-            
+
             self.d_service_discovery = HealthCheckServiceDiscovery(
                 server_type=ServerType.D_INSTANCE,
                 instances=list(range(len(self.d_addr_list))),
@@ -179,42 +191,48 @@ class Proxy(EngineClient):
                 health_threshold=self.health_threshold,
                 health_check_func=self.check_health,
             )
-            
+
             self.p_metrics_logger = MetricsReporter(
                 server_type=ServerType.P_INSTANCE,
-                instances=list(range(len(self.p_addr_list + self.d_addr_list))),
-                addr=self.p_addr_list + self.d_addr_list,
+                instances=list(range(len(self.p_addr_list))),
+                addr=self.p_addr_list,
                 get_metrics_func=self.get_metrics,
             )
-            
+
             self.d_metrics_logger = MetricsReporter(
-                server_type=ServerType.P_INSTANCE,
-                instances=list(range(len(self.p_addr_list + self.d_addr_list))),
-                addr=self.p_addr_list + self.d_addr_list,
+                server_type=ServerType.D_INSTANCE,
+                instances=list(range(len(self.d_addr_list))),
+                addr=self.d_addr_list,
                 get_metrics_func=self.get_metrics,
             )
-            
+
             self.p_request_stats_monitor = RequestStatsMonitor(
                 list(range(len(self.p_addr_list)))
             )
-            
+
             self.d_request_stats_monitor = RequestStatsMonitor(
-                list(range(len(self.p_addr_list)))
+                list(range(len(self.d_addr_list)))
             )
-            
-            self.p_router = ROUTER_MAP.get(llm_service_envs.PREFILL_ROUTER, RandomRouter)()
-            self.d_router = ROUTER_MAP.get(llm_service_envs.DECODE_ROUTER, RandomRouter)()
+
+            self.p_router = (
+                ROUTER_MAP.get(llm_service_envs.LM_SERVICE_PREFILL_ROUTER)
+                or router
+            )()
+            self.d_router = (
+                ROUTER_MAP.get(llm_service_envs.LM_SERVICE_DECODE_ROUTER)
+                or router
+            )()
 
             self.proxy_to_p_time_count: defaultdict[int, int] = defaultdict(int)
             self.proxy_to_p_time_total: defaultdict[int, float] = defaultdict(
                 float
             )
-            
+
             self.proxy_to_d_time_count: defaultdict[int, int] = defaultdict(int)
             self.proxy_to_d_time_total: defaultdict[int, float] = defaultdict(
                 float
             )
-            
+
         self.to_encode_sockets = []
         for addr in self.encode_addr_list:
             socket = self.ctx.socket(zmq.constants.PUSH)
@@ -230,7 +248,6 @@ class Proxy(EngineClient):
             health_check_func=self.check_health,
         )
 
-
         self.encoder_metrics_logger = MetricsReporter(
             server_type=ServerType.E_INSTANCE,
             instances=list(range(len(self.encode_addr_list))),
@@ -241,7 +258,10 @@ class Proxy(EngineClient):
             list(range(len(self.encode_addr_list)))
         )
 
-        self.encode_router = ROUTER_MAP.get(llm_service_envs.ENCODE_ROUTER, RandomRouter)()
+        self.encode_router = (
+            ROUTER_MAP.get(llm_service_envs.LM_SERVICE_ENCODE_ROUTER) or router
+        )()
+
         self.output_handler: Optional[asyncio.Task] = None
 
         # Dummy: needed for EngineClient Protocol.
@@ -274,7 +294,12 @@ class Proxy(EngineClient):
             os.remove(socket_path)
 
     async def log_metrics(self) -> None:
-        await self.pd_metrics_logger.get_metrics()
+        if self.is_pd_merged:
+            await self.pd_metrics_logger.get_metrics()
+        else:
+            await self.p_metrics_logger.get_metrics()
+            await self.d_metrics_logger.get_metrics()
+
         await self.encoder_metrics_logger.get_metrics()
 
     async def _run_encode(
@@ -387,8 +412,7 @@ class Proxy(EngineClient):
         q: asyncio.Queue[Union[Exception, GenerationResponse]],
     ):
         """
-        Send the generation request to a PD worker and yield its response.
-        The PD worker is selected based on hashing the request ID.
+        Send the prefill request to one encoder worker.
         """
         if not self.to_p_sockets:
             raise RuntimeError(
@@ -421,8 +445,7 @@ class Proxy(EngineClient):
             ):
                 self.proxy_to_p_time_count[idx] += 1
                 self.proxy_to_p_time_total[idx] += (
-                    response.proxy_to_worker_time_end
-                    - proxy_to_encode_time_start  # type: ignore
+                    response.proxy_to_worker_time_end - proxy_to_p_time_start  # type: ignore
                 )
 
             if isinstance(response, Exception):
@@ -438,8 +461,7 @@ class Proxy(EngineClient):
         q: asyncio.Queue[Union[Exception, GenerationResponse]],
     ):
         """
-        Send the generation request to a PD worker and yield its response.
-        The PD worker is selected based on hashing the request ID.
+        Send the generation request to a decode worker and yield its response.
         """
         if not self.to_d_sockets:
             raise RuntimeError(
@@ -485,7 +507,7 @@ class Proxy(EngineClient):
             self.d_request_stats_monitor.on_request_completed(
                 idx, request_id=request.request_id
             )
-            
+
     def _to_request_output(self, resp: GenerationResponse) -> RequestOutput:
         """Convert a PD/Generate response to vLLM RequestOutput.
 
@@ -539,7 +561,7 @@ class Proxy(EngineClient):
                 self.p_service_discovery.launch_health_monitor()
             if self.d_service_discovery.should_launch_health_monitor():
                 self.d_service_discovery.launch_health_monitor()
-        
+
         if not request_id:
             request_id = uuid.uuid4().hex
 
@@ -556,6 +578,7 @@ class Proxy(EngineClient):
             request_id=request_id,
             prompt=prompt_text,
             sampling_params=sampling_params,
+            proxy_addr=self.proxy_addr,
         )
 
         try:
@@ -569,7 +592,6 @@ class Proxy(EngineClient):
                 )
                 await self._run_encode(request, q)
 
-            # TODO: support pd separation
             if self.is_pd_merged:
                 async for pd_response in self._run_pd(request, q):
                     yield self._to_request_output(pd_response)
@@ -577,7 +599,7 @@ class Proxy(EngineClient):
                 await self._run_prefill(request, q)
                 async for d_response in self._run_decode(request, q):
                     yield self._to_request_output(d_response)
-                    
+
         except msgspec.ValidationError as e:
             raise RuntimeError(f"Invalid Parameters: {e}.") from e
         finally:
@@ -674,7 +696,7 @@ class Proxy(EngineClient):
                             request_stats_monitor=self.d_request_stats_monitor,
                         )
                     )
-                    
+
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -692,7 +714,11 @@ class Proxy(EngineClient):
                     MetricsResponse,
                 ]
                 # TODO: maybe we can have a mapping from resp_type to prefill
-                if resp_type in (ResponseType.GENERATION, ResponseType.ENCODE, ResponseType.PREFILL):
+                if resp_type in (
+                    ResponseType.GENERATION,
+                    ResponseType.ENCODE,
+                    ResponseType.PREFILL,
+                ):
                     resp = decoder.decode(payload)
                 elif resp_type == ResponseType.HEARTBEAT:
                     resp = heartbeat_decoder.decode(payload)
@@ -770,7 +796,9 @@ class Proxy(EngineClient):
                 self._run_output_handler()
             )
         request_id = str(uuid.uuid4())
-        request = HeartbeatRequest(request_id=request_id)
+        request = HeartbeatRequest(
+            request_id=request_id, proxy_addr=self.proxy_addr
+        )
         q: asyncio.Queue = asyncio.Queue()
         self.queues[request_id] = q
         try:
@@ -778,7 +806,11 @@ class Proxy(EngineClient):
             msg = (RequestType.HEARTBEAT, payload)
             if server_type == ServerType.PD_INSTANCE:
                 socket = self.to_pd_sockets[id]
-            else:
+            elif server_type == ServerType.P_INSTANCE:
+                socket = self.to_p_sockets[id]
+            elif server_type == ServerType.D_INSTANCE:
+                socket = self.to_d_sockets[id]
+            elif server_type == ServerType.E_INSTANCE:
                 socket = self.to_encode_sockets[id]
 
             await socket.send_multipart(msg, copy=False)
@@ -802,7 +834,9 @@ class Proxy(EngineClient):
 
     async def get_metrics(self, server_type: ServerType, id: int):
         request_id = str(uuid.uuid4())
-        request = MetricsRequest(request_id=request_id)
+        request = MetricsRequest(
+            request_id=request_id, proxy_addr=self.proxy_addr
+        )
         q: asyncio.Queue = asyncio.Queue()
         self.queues[request_id] = q
         try:
@@ -810,7 +844,11 @@ class Proxy(EngineClient):
             msg = (RequestType.METRICS, payload)
             if server_type == ServerType.PD_INSTANCE:
                 socket = self.to_pd_sockets[id]
-            else:
+            elif server_type == ServerType.P_INSTANCE:
+                socket = self.to_p_sockets[id]
+            elif server_type == ServerType.D_INSTANCE:
+                socket = self.to_d_sockets[id]
+            elif server_type == ServerType.E_INSTANCE:
                 socket = self.to_encode_sockets[id]
 
             await socket.send_multipart(msg, copy=False)

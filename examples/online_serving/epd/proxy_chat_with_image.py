@@ -12,6 +12,10 @@ from llm_service.apis.vllm.proxy import Proxy
 import vllm.envs as envs
 import llm_service.envs as llm_service_envs
 
+PROXY_NUM = 1
+PROXY_PORT_BASE = 38000
+TRANSFER_PROTOCOL = "ipc"
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--proxy-addr", required=True, help="Proxy address")
 parser.add_argument(
@@ -22,21 +26,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--pd-addr-list",
-    required=False,
+    required=True,
     nargs="+",
     help="List of pd addresses",
-)
-parser.add_argument(
-    "--p-addr-list",
-    required=False,
-    nargs="+",
-    help="List of prefill addresses",
-)
-parser.add_argument(
-    "--d-addr-list",
-    required=False,
-    nargs="+",
-    help="List of decode addresses",
 )
 parser.add_argument(
     "--transfer-protocol",
@@ -69,14 +61,12 @@ async def run_single_request(i, prompt, image_array, sampling_params, p):
         print(f"Request({i}) generated_text: {generated_text}", flush=True)
 
 
-async def main():
+async def run_single_proxy(proxy_addr):
     # new proxy
     p = Proxy(
-        proxy_addr=args.proxy_addr,
+        proxy_addr=proxy_addr,
         encode_addr_list=args.encode_addr_list,
         pd_addr_list=args.pd_addr_list,
-        p_addr_list=args.p_addr_list,
-        d_addr_list=args.d_addr_list,
         model_name=args.model_name,
         enable_health_monitor=False,
         transfer_protocol=args.transfer_protocol,
@@ -107,6 +97,17 @@ async def main():
             await p.log_metrics()
     finally:
         p.shutdown()
+
+
+async def main():
+    if TRANSFER_PROTOCOL == "tcp":
+        proxy_addr_list = [
+            f"{args.proxy_addr}:{PROXY_PORT_BASE + i}" for i in range(PROXY_NUM)
+        ]
+    else:
+        proxy_addr_list = [f"{args.proxy_addr}_{i}" for i in range(PROXY_NUM)]
+    tasks = [run_single_proxy(proxy_addr) for proxy_addr in proxy_addr_list]
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

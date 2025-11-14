@@ -15,22 +15,15 @@ ENCODER_ADDR_PREFIX="${ENCODER_ADDR_PREFIX:-/tmp/encoder}"
 ENCODER_DEVICE_ID_BASE=0
 ENCODER_NUMBER=1
 
-# Prefill default config
-MAX_NUM_SEQS_PREFILL="${MAX_NUM_SEQS_PREFILL:-128}"
-GPU_UTILIZATION_PREFILL=0.95
-PREFILL_ADDR_PREFIX="${PREFILL_ADDR_PREFIX:-/tmp/prefill}"
-PREFILL_DEVICE_ID_BASE=1
-PREFILL_NUMBER=1
+# PD default config
+MAX_NUM_SEQS_PD="${MAX_NUM_SEQS_PD:-128}"
+GPU_UTILIZATION_PD=0.95
+PD_ADDR_PREFIX="${PD_ADDR_PREFIX:-/tmp/prefill_decode}"
+PD_DEVICE_ID_BASE=1
+PD_NUMBER=1
 
-# Decoder default config
-MAX_NUM_SEQS_DECODER="${MAX_NUM_SEQS_DECODER:-128}"
-GPU_UTILIZATION_D=0.95
-DECODER_ADDR_PREFIX="${DECODER_ADDR_PREFIX:-/tmp/decoder}"
-DECODER_DEVICE_ID_BASE=2
-DECODER_NUMBER=1
-
-# Proxy default config
-PROXY_ADDR="${PROXY_ADDR:-/tmp/proxy}"
+PROXY_NUMBER=1
+PROXY_ADDR_PREFIX="${PROXY_ADDR:-/tmp/proxy}"
 
 LOG_PATH="${CURRENT_DIR}/logs"
 IMAGE_FILE_PATH=""
@@ -38,11 +31,11 @@ IMAGE_FILE_PATH=""
 function start_encoder() {
     local dev_id=$1
     local address=$2
-    local proxy_address=$3
+    local proxy_address_prefix=$3
     local log_file=$4
 
     VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m llm_service.entrypoints.worker \
-        --proxy-addr $proxy_address \
+        --proxy-addr $(for ((i=0; i<PROXY_NUMBER; i++)); do echo -n "${proxy_address_prefix}_$i "; done) \
         --worker-addr $address \
         --model $MODEL \
         --gpu-memory-utilization $GPU_UTILIZATION_ENCODER \
@@ -60,81 +53,24 @@ function start_encoder() {
     echo $! >> "$PID_FILE"
 }
 
-function start_prefill() {
+function start_pd() {
     local dev_id=$1
     local address=$2
-    local proxy_address=$3
+    local proxy_address_prefix=$3
     local log_file=$4
 
     VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m llm_service.entrypoints.worker \
-        --proxy-addr $proxy_address \
+        --proxy-addr $(for ((i=0; i<PROXY_NUMBER; i++)); do echo -n "${proxy_address_prefix}_$i "; done) \
         --worker-addr $address \
         --model $MODEL \
-        --gpu-memory-utilization $GPU_UTILIZATION_PREFILL \
-        --max-num-seqs $MAX_NUM_SEQS_PREFILL \
+        --gpu-memory-utilization $GPU_UTILIZATION_PD \
+        --max-num-seqs $MAX_NUM_SEQS_PD \
         --enforce-eager \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_consumer",
             "ec_connector_extra_config": {
                 "shared_storage_path": "'"$SHARED_STORAGE_PATH"'"
-            }
-        }' \
-        --kv-transfer-config '{
-            "kv_connector": "MooncakeConnectorV1",
-            "kv_buffer_device": "npu",
-            "kv_role": "kv_producer",
-            "kv_parallel_size": 1,
-            "kv_port": "20001",
-            "engine_id": 0,
-            "kv_rank": 0,
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-            "kv_connector_extra_config": {
-                "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                },
-                "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                }
-            }
-        }' \
-        >"$log_file" 2>&1 &
-    echo $! >> "$PID_FILE"
-}
-
-function start_decoder() {
-    local dev_id=$1
-    local address=$2
-    local proxy_address=$3
-    local log_file=$4
-
-    VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m llm_service.entrypoints.worker \
-        --proxy-addr $proxy_address \
-        --worker-addr $address \
-        --model $MODEL \
-        --gpu-memory-utilization $GPU_UTILIZATION_D \
-        --max-num-seqs $MAX_NUM_SEQS_DECODER \
-        --enforce-eager \
-        --kv-transfer-config '{
-            "kv_connector": "MooncakeConnectorV1",
-            "kv_buffer_device": "npu",
-            "kv_role": "kv_consumer",
-            "kv_parallel_size": 1,
-            "kv_port": "20002",
-            "engine_id": 0,
-            "kv_rank": 0,
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-            "kv_connector_extra_config": {
-                "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                },
-                "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                }
             }
         }' \
         >"$log_file" 2>&1 &
@@ -156,26 +92,17 @@ function start_all() {
         dev_id=$((ENCODER_DEVICE_ID_BASE + i))
         address="${ENCODER_ADDR_PREFIX}_$i"
         log_file="$LOG_PATH/encoder_$i.log"
-        start_encoder $dev_id $address $PROXY_ADDR $log_file
+        start_encoder $dev_id $address $PROXY_ADDR_PREFIX $log_file
         echo "  Encoder worker $i starting on device $dev_id, address: $address, log: $log_file"
     done
 
-    echo "Starting prefill workers..."
-    for ((i=0; i<PREFILL_NUMBER; i++)); do
-        dev_id=$((PREFILL_DEVICE_ID_BASE + i))
-        address="${PREFILL_ADDR_PREFIX}_$i"
-        log_file="$LOG_PATH/prefill_$i.log"
-        start_prefill $dev_id $address $PROXY_ADDR $log_file
-        echo "  Prefill worker $i starting on device $dev_id, address: $address, log: $log_file"
-    done
-
-    echo "Starting decode workers..."
-    for ((i=0; i<DECODER_NUMBER; i++)); do
-        dev_id=$((DECODER_DEVICE_ID_BASE + i))
-        address="${DECODER_ADDR_PREFIX}_$i"
-        log_file="$LOG_PATH/decoder_$i.log"
-        start_decoder $dev_id $address $PROXY_ADDR $log_file
-        echo "  Decode worker $i starting on device $dev_id, address: $address, log: $log_file"
+    echo "Starting prefill/decode workers..."
+    for ((i=0; i<PD_NUMBER; i++)); do
+        dev_id=$((PD_DEVICE_ID_BASE + i))
+        address="${PD_ADDR_PREFIX}_$i"
+        log_file="$LOG_PATH/prefill_decode_$i.log"
+        start_pd $dev_id $address $PROXY_ADDR_PREFIX $log_file
+        echo "  Prefill/decode worker $i starting on device $dev_id, address: $address, log: $log_file"
     done
 
     echo "All workers starting. PIDs are stored in $PID_FILE."
@@ -208,9 +135,9 @@ function stop_all() {
 
 function print_help() {
     echo "Usage: $0 [--model MODEL] [--shared-storage-path PATH]
-              [--gpu-utilization-encoder FLOAT] [--encoder-device-id-base INT] [--encoder-number INT]
-              [--gpu-utilization-prefill FLOAT] [--prefill-device-id-base INT] [--prefill-number INT]
-              [--gpu-utilization-decode FLOAT] [--decode-device-id-base INT] [--decode-number INT]
+              [--gpu-utilization-encoder FLOAT] [--gpu-utilization-pd FLOAT]
+              [--encoder-device-id-base INT] [--encoder-number INT]
+              [--pd-device-id-base INT] [--pd-number INT]
               [--image-file-path PATH] [--log-path PATH]
               [--stop] [--help]"
 }
@@ -246,14 +173,13 @@ fi
 
 start_all
 
-chat_with_image() {
-    python $CURRENT_DIR/chat_with_image.py \
-        --proxy-addr $PROXY_ADDR \
+proxy_chat_with_image() {
+    python $CURRENT_DIR/proxy_chat_with_image.py \
+        --proxy-addr $PROXY_ADDR_PREFIX \
         --encode-addr-list $(for ((i=0; i<ENCODER_NUMBER; i++)); do echo -n "${ENCODER_ADDR_PREFIX}_$i "; done) \
-        --p-addr-list $(for ((i=0; i<PREFILL_NUMBER; i++)); do echo -n "${PREFILL_ADDR_PREFIX}_$i "; done) \
-        --d-addr-list $(for ((i=0; i<DECODER_NUMBER; i++)); do echo -n "${DECODER_ADDR_PREFIX}_$i "; done) \
+        --pd-addr-list $(for ((i=0; i<PD_NUMBER; i++)); do echo -n "${PD_ADDR_PREFIX}_$i "; done) \
         --model-name $MODEL \
         --image-path $IMAGE_FILE_PATH
 }
 
-chat_with_image
+proxy_chat_with_image
