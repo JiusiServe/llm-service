@@ -13,10 +13,10 @@ import vllm.envs as envs
 import llm_service.envs as llm_service_envs
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--proxy-addr", required=True, help="Proxy address")
+parser.add_argument("--proxy-addr", required=False, help="Proxy address")
 parser.add_argument(
     "--encode-addr-list",
-    required=True,
+    required=False,
     nargs="+",
     help="List of encode addresses",
 )

@@ -17,16 +17,16 @@ PROXY_PORT_BASE = 38000
 TRANSFER_PROTOCOL = "ipc"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--proxy-addr", required=True, help="Proxy address")
+parser.add_argument("--proxy-addr", required=False, help="Proxy address")
 parser.add_argument(
     "--encode-addr-list",
-    required=True,
+    required=False,
     nargs="+",
     help="List of encode addresses",
 )
 parser.add_argument(
     "--pd-addr-list",
-    required=True,
+    required=False,
     nargs="+",
     help="List of pd addresses",
 )

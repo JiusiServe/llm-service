@@ -3,7 +3,6 @@
 
 import asyncio
 import os
-import re
 import time
 from typing import Any, Optional, Union
 
@@ -25,9 +24,17 @@ from llm_service.protocol.protocol import (
     RequestType,
     ResponseType,
 )
-from vllm.engine.protocol import EngineClient
-import vllm.envs as envs
 import llm_service.envs as llm_service_envs
+from llm_service.redis_client import RedisClient
+from llm_service.protocol.protocol import (
+    get_local_ip,
+    get_open_port,
+    is_addr_ipv6,
+)
+
+from vllm.engine.protocol import EngineClient
+
+import vllm.envs as envs
 
 from llm_service.logger_utils import init_logger
 
@@ -46,24 +53,48 @@ class DisaggWorker:
         self.transfer_protocol = (
             llm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
-        self.worker_addr = f"{self.transfer_protocol}://{address}"
-        self.proxy_addr_list = [
-            f"{self.transfer_protocol}://{addr}" for addr in proxy_addr
-        ]
-        self.ctx = zmq.asyncio.Context()
-        ipv6_pattern = r"^\[(.*?)\]:(\d+)$"
-        if re.match(ipv6_pattern, address) and self.transfer_protocol == "tcp":
-            self.ctx.setsockopt(zmq.constants.IPV6, 1)
-        self.from_proxy = self.ctx.socket(zmq.constants.PULL)
-        self.from_proxy.bind(self.worker_addr)
+
         self.to_proxy: dict[str, zmq.asyncio.Socket] = {}
-        for addr in self.proxy_addr_list:
-            socket = self.ctx.socket(zmq.constants.PUSH)
-            socket.connect(addr)
-            self.to_proxy[addr] = socket
-        logger.info(
-            f"Worker address: {self.worker_addr}, proxy_addr: {self.proxy_addr_list}"
-        )
+        if llm_service_envs.AUTO_DISCOVERY_SERVICE:
+            worker_ip = get_local_ip()
+            worker_port = (
+                int(llm_service_envs.NODE_PORT)
+                if llm_service_envs.NODE_PORT
+                else get_open_port()
+            )
+            self.worker_addr = (
+                f"{self.transfer_protocol}://{worker_ip}:{worker_port}"
+            )
+            self.ctx = zmq.asyncio.Context()
+            if (
+                is_addr_ipv6(self.worker_addr)
+                and self.transfer_protocol == "tcp"
+            ):
+                self.ctx.setsockopt(zmq.constants.IPV6, 1)
+            self.from_proxy = self.ctx.socket(zmq.constants.PULL)
+            self.from_proxy.bind(self.worker_addr)
+            self.redis_client = RedisClient(
+                node_info=self.worker_addr,
+                engine_type=llm_service_envs.SERVER_TYPE,
+                to_proxy=self.to_proxy,
+            )
+        else:
+            self.worker_addr = f"{self.transfer_protocol}://{address}"
+            self.proxy_addr_list = [
+                f"{self.transfer_protocol}://{addr}" for addr in proxy_addr
+            ]
+            self.ctx = zmq.asyncio.Context()
+            if is_addr_ipv6(address) and self.transfer_protocol == "tcp":
+                self.ctx.setsockopt(zmq.constants.IPV6, 1)
+            self.from_proxy = self.ctx.socket(zmq.constants.PULL)
+            self.from_proxy.bind(self.worker_addr)
+            for addr in self.proxy_addr_list:
+                socket = self.ctx.socket(zmq.constants.PUSH)
+                socket.connect(addr)
+                self.to_proxy[addr] = socket
+            logger.info(
+                f"Worker address: {self.worker_addr}, proxy_addr: {self.proxy_addr_list}"
+            )
         self.decoder_generate = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
@@ -136,10 +167,17 @@ class DisaggWorker:
 
     async def _handle_response(self, req, msg):
         if req.proxy_addr not in self.to_proxy:
-            logger.error(
-                f"request {req.request_id} could not find proxy address {req.proxy_addr}."
-            )
-            return
+            if not llm_service_envs.AUTO_DISCOVERY_SERVICE:
+                logger.error(
+                    f"request {req.request_id} could not find proxy address {req.proxy_addr}."
+                )
+                return
+            self.redis_client.update_proxy_sockets()
+            if req.proxy_addr not in self.to_proxy:
+                logger.error(
+                    f"request {req.request_id} could not find proxy address {req.proxy_addr}."
+                )
+                return
 
         await self.to_proxy[req.proxy_addr].send_multipart(msg, copy=False)
 
