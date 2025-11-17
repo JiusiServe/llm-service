@@ -4,7 +4,7 @@ LM-Service is a high-performance proxy designed for disaggregated serving of LLM
 
 <img width="1204" height="1440" alt="image" src="docs/architecture/llm_service_arch.drawio.svg" />
 
-## Architecture
+## Key Components
 
 - HTTP Server: provides OpenAI-compatible APIs along with APIs for health checks and monitoring.
 - Python SDK: offers asynchronous Python API support, designed to integrate into the customer's serving framework.
