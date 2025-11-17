@@ -45,12 +45,12 @@ jobs:
     
     - name: Run bandit security linter
       run: |
-        uv run bandit -r llm_service/ -f json -o bandit-report.json || true
+        uv run bandit -r lm_service/ -f json -o bandit-report.json || true
         echo "Bandit scan completed"
         
     - name: Run semgrep
       run: |
-        uv run semgrep --config=auto --json --output=semgrep-report.json llm_service/ || true
+        uv run semgrep --config=auto --json --output=semgrep-report.json lm_service/ || true
         echo "Semgrep scan completed"
     
     - name: Upload security scan results

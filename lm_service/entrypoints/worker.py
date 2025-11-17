@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import uvloop
-from llm_service.stats_loggers import DisaggWorkerStatsLogger
-from llm_service.workers.vllm.disagg_worker import DisaggWorker
+from lm_service.stats_loggers import DisaggWorkerStatsLogger
+from lm_service.workers.vllm.disagg_worker import DisaggWorker
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
-import llm_service.envs as llm_service_envs
+import lm_service.envs as lm_service_envs
 import signal
-from llm_service.logger_utils import init_logger
+from lm_service.logger_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -42,7 +42,7 @@ async def main(args) -> None:
     logger.info("Args: %s", args)
 
     stat_loggers = None
-    if llm_service_envs.TIMECOUNT_ENABLED:
+    if lm_service_envs.TIMECOUNT_ENABLED:
         stat_loggers = [DisaggWorkerStatsLogger]
         logger.info("Time counting is enabled.")
     if getattr(args.ec_transfer_config, "ec_role", None) == "ec_producer":

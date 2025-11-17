@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import asyncio
 import os
@@ -13,8 +13,8 @@ from numpy.typing import NDArray
 import zmq
 import zmq.asyncio
 
-from llm_service.stats_loggers import DisaggWorkerStatsLogger
-from llm_service.protocol.protocol import (
+from lm_service.stats_loggers import DisaggWorkerStatsLogger
+from lm_service.protocol.protocol import (
     FailureResponse,
     GenerationRequest,
     GenerationResponse,
@@ -27,9 +27,9 @@ from llm_service.protocol.protocol import (
 )
 from vllm.engine.protocol import EngineClient
 import vllm.envs as envs
-import llm_service.envs as llm_service_envs
+import lm_service.envs as lm_service_envs
 
-from llm_service.logger_utils import init_logger
+from lm_service.logger_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -44,7 +44,7 @@ class DisaggWorker:
     ):
         self.engine = engine
         self.transfer_protocol = (
-            llm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
+            lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.worker_addr = f"{self.transfer_protocol}://{address}"
         self.proxy_addr_list = [
@@ -89,7 +89,7 @@ class DisaggWorker:
 
         poller = zmq.asyncio.Poller()
         poller.register(self.from_proxy, zmq.POLLIN)
-        if llm_service_envs.TIMECOUNT_ENABLED:
+        if lm_service_envs.TIMECOUNT_ENABLED:
             # log engine stats (logger stats and EPD stats (if enabled))
             async def _force_log():
                 while True:
@@ -188,7 +188,7 @@ class DisaggWorker:
     ):
         request_id = req.request_id
         # time of the first token worker receive request from proxy
-        if llm_service_envs.TIMECOUNT_ENABLED:
+        if lm_service_envs.TIMECOUNT_ENABLED:
             recv_timestamp = time.perf_counter()
         first_token_flag = True
         try:
@@ -208,7 +208,7 @@ class DisaggWorker:
                 response = GenerationResponse.from_request_output(
                     request_output
                 )
-                if llm_service_envs.TIMECOUNT_ENABLED and first_token_flag:
+                if lm_service_envs.TIMECOUNT_ENABLED and first_token_flag:
                     response.proxy_to_worker_time_end = recv_timestamp  # type: ignore
                     first_token_flag = False
                 response_bytes = self.encoder.encode(response)

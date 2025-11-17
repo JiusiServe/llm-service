@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 from enum import Enum, auto
 from typing import Any, Optional, Union

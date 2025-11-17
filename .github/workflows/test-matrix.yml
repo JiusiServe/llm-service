@@ -44,4 +44,4 @@ jobs:
     
     - name: Test package import
       run: |
-        uv run python -c "import llm_service; print('Package imported successfully')"
+        uv run python -c "import lm_service; print('Package imported successfully')"

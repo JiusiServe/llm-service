@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import pytest
 
-from llm_service.routing_logic import LeastInFlightRouter
-from llm_service.request_stats import RequestStats
+from lm_service.routing_logic import LeastInFlightRouter
+from lm_service.request_stats import RequestStats
 
 
 class TestLeastInFlightRouter:

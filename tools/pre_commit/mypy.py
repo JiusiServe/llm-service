@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 """Run mypy on the staged files.
 
 Usage: python tools/pre_commit/mypy.py <ci flag> <python version> <paths...>
@@ -28,7 +28,7 @@ def group_targets(paths: list[str]) -> list[str]:
         elif path.suffix == ".py":
             targets.add(path)
     if not targets:
-        project_root = Path("llm_service")
+        project_root = Path("lm_service")
         if project_root.exists():
             targets.add(project_root)
     return sorted(str(path) for path in targets)
@@ -47,7 +47,7 @@ def run_mypy(ci_mode: bool, python_version: str, targets: list[str]) -> int:
 
     resolved_version = resolve_python_version(python_version)
     # Use explicit package bases to avoid duplicate module discovery when
-    # passing directory targets (e.g. "llm_service").
+    # passing directory targets (e.g. "lm_service").
     args = [
         "mypy",
         "--python-version",

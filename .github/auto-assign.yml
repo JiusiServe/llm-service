@@ -36,15 +36,15 @@ skipKeywords:
 includeDraftPR: false
 
 # Assign reviewers based on file paths
-# reviewGroups:
-#   core:
-#     reviewers:
-#       - wuhang2014
-#     paths:
-#       - "llm_service/**"
-#   
-#   api:
-#     reviewers:
-#       - api-reviewer
-#     paths:
-#       - "llm_service/apis/**"
+reviewGroups:
+  core:
+    reviewers:
+      - wuhang2014
+    paths:
+      - "lm_service/**"
+
+  api:
+    reviewers:
+      - wuhang2014
+    paths:
+      - "lm_service/apis/**"

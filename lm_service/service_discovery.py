@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import asyncio
 import time
 from abc import ABC, abstractmethod
 
-from llm_service.protocol.protocol import ServerType
-from llm_service.logger_utils import init_logger
+from lm_service.protocol.protocol import ServerType
+from lm_service.logger_utils import init_logger
 
 logger = init_logger(__name__)
 

@@ -3,12 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llm_service"
+name = "lm_service"
 version = "0.1.0"
 description = "Disaggregated vLLM service components"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "llm-service maintainers" }]
+authors = [{ name = "lm-service maintainers" }]
 dependencies = [
     "msgspec>=0.18",
     "numpy>=1.24",
@@ -32,7 +32,7 @@ develop = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["llm_service*"]
+include = ["lm_service*"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -52,7 +52,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["llm_service"]
+source = ["lm_service"]
 branch = true
 omit = [
     "*/tests/*",

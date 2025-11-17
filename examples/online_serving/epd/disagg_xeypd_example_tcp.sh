@@ -61,7 +61,7 @@ function start_encoder() {
     local proxy_address=$3
     local log_file=$4
 
-    VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m llm_service.entrypoints.worker \
+    VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m lm_service.entrypoints.worker \
         --proxy-addr $proxy_address \
         --worker-addr $address \
         --transfer-protocol "tcp" \
@@ -88,7 +88,7 @@ function start_pd() {
     local proxy_address=$3
     local log_file=$4
 
-    VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m llm_service.entrypoints.worker \
+    VLLM_USE_V1=1 ASCEND_RT_VISIBLE_DEVICES=$dev_id python -m lm_service.entrypoints.worker \
         --proxy-addr $proxy_address \
         --worker-addr $address \
         --transfer-protocol "tcp" \

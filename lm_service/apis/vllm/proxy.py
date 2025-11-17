@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import asyncio
 from collections import defaultdict
@@ -16,7 +16,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import ModelConfig, VllmConfig
-from llm_service.protocol.protocol import (
+from lm_service.protocol.protocol import (
     FailureResponse,
     GenerationRequest,
     GenerationResponse,
@@ -28,15 +28,15 @@ from llm_service.protocol.protocol import (
     ResponseType,
     ServerType,
 )
-from llm_service.request_stats import RequestStatsMonitor
-from llm_service.routing_logic import (
+from lm_service.request_stats import RequestStatsMonitor
+from lm_service.routing_logic import (
     RoutingInterface,
     RandomRouter,
     RoundRobinRouter,
     LeastInFlightRouter,
 )
-from llm_service.service_discovery import HealthCheckServiceDiscovery
-from llm_service.stats_loggers import MetricsReporter
+from lm_service.service_discovery import HealthCheckServiceDiscovery
+from lm_service.stats_loggers import MetricsReporter
 
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.data import PromptType
@@ -47,8 +47,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device
-import llm_service.envs as llm_service_envs
-from llm_service.logger_utils import init_logger
+import lm_service.envs as lm_service_envs
+from lm_service.logger_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -82,7 +82,7 @@ class Proxy(EngineClient):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.transfer_protocol = (
-            llm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
+            lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.ctx = zmq.asyncio.Context()
         ipv6_pattern = r"^\[(.*?)\]:(\d+)$"
@@ -144,7 +144,7 @@ class Proxy(EngineClient):
                 list(range(len(self.pd_addr_list)))
             )
             self.pd_router = (
-                ROUTER_MAP.get(llm_service_envs.LM_SERVICE_PD_ROUTER) or router
+                ROUTER_MAP.get(lm_service_envs.LM_SERVICE_PD_ROUTER) or router
             )()
             self.proxy_to_pd_time_count: defaultdict[int, int] = defaultdict(
                 int
@@ -215,11 +215,11 @@ class Proxy(EngineClient):
             )
 
             self.p_router = (
-                ROUTER_MAP.get(llm_service_envs.LM_SERVICE_PREFILL_ROUTER)
+                ROUTER_MAP.get(lm_service_envs.LM_SERVICE_PREFILL_ROUTER)
                 or router
             )()
             self.d_router = (
-                ROUTER_MAP.get(llm_service_envs.LM_SERVICE_DECODE_ROUTER)
+                ROUTER_MAP.get(lm_service_envs.LM_SERVICE_DECODE_ROUTER)
                 or router
             )()
 
@@ -259,7 +259,7 @@ class Proxy(EngineClient):
         )
 
         self.encode_router = (
-            ROUTER_MAP.get(llm_service_envs.LM_SERVICE_ENCODE_ROUTER) or router
+            ROUTER_MAP.get(lm_service_envs.LM_SERVICE_ENCODE_ROUTER) or router
         )()
 
         self.output_handler: Optional[asyncio.Task] = None
@@ -330,12 +330,12 @@ class Proxy(EngineClient):
         )
         try:
             socket = self.to_encode_sockets[idx]
-            if llm_service_envs.TIMECOUNT_ENABLED:
+            if lm_service_envs.TIMECOUNT_ENABLED:
                 proxy_to_encode_time_start = time.perf_counter()
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             if (
-                llm_service_envs.TIMECOUNT_ENABLED
+                lm_service_envs.TIMECOUNT_ENABLED
                 and isinstance(response, GenerationResponse)
                 and response.proxy_to_worker_time_end
             ):
@@ -381,7 +381,7 @@ class Proxy(EngineClient):
 
         try:
             socket = self.to_pd_sockets[idx]
-            if llm_service_envs.TIMECOUNT_ENABLED:
+            if lm_service_envs.TIMECOUNT_ENABLED:
                 proxy_to_pd_time_start = time.perf_counter()
             await socket.send_multipart(msg, copy=False)
             finished = False
@@ -390,7 +390,7 @@ class Proxy(EngineClient):
                 if isinstance(response, Exception):
                     raise response
                 if (
-                    llm_service_envs.TIMECOUNT_ENABLED
+                    lm_service_envs.TIMECOUNT_ENABLED
                     and isinstance(response, GenerationResponse)
                     and response.proxy_to_worker_time_end
                 ):
@@ -434,12 +434,12 @@ class Proxy(EngineClient):
 
         try:
             socket = self.to_p_sockets[idx]
-            if llm_service_envs.TIMECOUNT_ENABLED:
+            if lm_service_envs.TIMECOUNT_ENABLED:
                 proxy_to_p_time_start = time.perf_counter()
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             if (
-                llm_service_envs.TIMECOUNT_ENABLED
+                lm_service_envs.TIMECOUNT_ENABLED
                 and isinstance(response, GenerationResponse)
                 and response.proxy_to_worker_time_end
             ):
@@ -483,7 +483,7 @@ class Proxy(EngineClient):
 
         try:
             socket = self.to_d_sockets[idx]
-            if llm_service_envs.TIMECOUNT_ENABLED:
+            if lm_service_envs.TIMECOUNT_ENABLED:
                 proxy_to_d_time_start = time.perf_counter()
             await socket.send_multipart(msg, copy=False)
             finished = False
@@ -492,7 +492,7 @@ class Proxy(EngineClient):
                 if isinstance(response, Exception):
                     raise response
                 if (
-                    llm_service_envs.TIMECOUNT_ENABLED
+                    lm_service_envs.TIMECOUNT_ENABLED
                     and isinstance(response, GenerationResponse)
                     and response.proxy_to_worker_time_end
                 ):

@@ -1,6 +1,6 @@
-# Contributing to llm-service
+# Contributing to LM-Service
 
-Thank you for your interest in contributing to llm-service! This document
+Thank you for your interest in contributing to LM-Service! This document
 provides guidelines and information for contributors.
 
 ## Code of Conduct
@@ -22,8 +22,8 @@ Conduct. Please be respectful and professional in all interactions.
 2. Clone your fork:
 
    ```bash
-   git clone https://github.com/yourusername/llm-service.git
-   cd llm-service
+   git clone https://github.com/yourusername/LM-Service.git
+   cd LM-Service
    ```
 
 3. Install dependencies:
@@ -151,4 +151,4 @@ If you have questions about contributing, feel free to:
 - Ask in the issue comments
 - Contact the maintainers
 
-Thank you for contributing to llm-service!
+Thank you for contributing to LM-Service!

@@ -1,6 +1,6 @@
 # Examples
 
-## install llm_service
+## install lm_service
 
 ```bash
 pip install -e .

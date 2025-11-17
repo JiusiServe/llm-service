@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 """Ensure Python sources carry the expected SPDX header.
 
 The hook verifies that tracked files contain both the license and copyright
@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 
 LICENSE_LINE = "# SPDX-License-Identifier: Apache-2.0"
-COPYRIGHT_LINE = "# SPDX-FileCopyrightText: Copyright contributors to the llm-service project"
+COPYRIGHT_LINE = "# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project"
 FULL_HEADER = f"{LICENSE_LINE}\n{COPYRIGHT_LINE}"
 
 

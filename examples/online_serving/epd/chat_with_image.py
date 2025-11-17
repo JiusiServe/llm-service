@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 import argparse
 import asyncio
 import uuid
@@ -8,9 +8,9 @@ import numpy as np
 from PIL import Image
 
 from vllm import SamplingParams
-from llm_service.apis.vllm.proxy import Proxy
+from lm_service.apis.vllm.proxy import Proxy
 import vllm.envs as envs
-import llm_service.envs as llm_service_envs
+import lm_service.envs as lm_service_envs
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--proxy-addr", required=True, help="Proxy address")
@@ -101,7 +101,7 @@ async def main():
             for i in range(10)
         ]
         await asyncio.gather(*tasks)
-        if llm_service_envs.TIMECOUNT_ENABLED:
+        if lm_service_envs.TIMECOUNT_ENABLED:
             # wait for logging
             await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
             await p.log_metrics()

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 # Ensure that *.excalidraw.png files keep their embedded scene metadata.
 # This allows round-tripping diagrams back into Excalidraw for future edits.

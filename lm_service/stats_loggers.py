@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import asyncio
 from collections import defaultdict
@@ -7,11 +7,11 @@ import threading
 import time
 from typing import ClassVar, Optional, Union
 
-from llm_service.protocol.protocol import ServerType
+from lm_service.protocol.protocol import ServerType
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.config import VllmConfig
-from llm_service.logger_utils import init_logger
+from lm_service.logger_utils import init_logger
 
 logger = init_logger(__name__)
 

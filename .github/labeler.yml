@@ -5,36 +5,36 @@
 core:
   - changed-files:
       - any-glob-to-any-file:
-          - 'llm_service/*.py'
-          - 'llm_service/entrypoints/**'
+          - 'lm_service/*.py'
+          - 'lm_service/entrypoints/**'
 
 # API and proxy related
 api:
   - changed-files:
       - any-glob-to-any-file:
-          - 'llm_service/apis/**'
+          - 'lm_service/apis/**'
           - '**/*proxy*'
 
 # vLLM integration
 vllm:
   - changed-files:
       - any-glob-to-any-file:
-          - 'llm_service/apis/vllm/**'
-          - 'llm_service/workers/vllm/**'
+          - 'lm_service/apis/vllm/**'
+          - 'lm_service/workers/vllm/**'
           - '**/*vllm*'
 
 # Worker processes
 workers:
   - changed-files:
       - any-glob-to-any-file:
-          - 'llm_service/workers/**'
-          - 'llm_service/entrypoints/worker.py'
+          - 'lm_service/workers/**'
+          - 'lm_service/entrypoints/worker.py'
 
 # Protocol related
 protocol:
   - changed-files:
       - any-glob-to-any-file:
-          - 'llm_service/protocol/**'
+          - 'lm_service/protocol/**'
 
 # Documentation
 documentation:

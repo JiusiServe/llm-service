@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the llm-service project
+# SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import numpy as np
 import pytest
 
 try:
-    from llm_service.apis.vllm.proxy import _encode_mm_data
+    from lm_service.apis.vllm.proxy import _encode_mm_data
 except ImportError:
     pytest.skip(
         "vllm dependencies not available for integration test",
