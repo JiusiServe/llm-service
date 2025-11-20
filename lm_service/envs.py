@@ -60,6 +60,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "LM_SERVICE_STARTUP_WAIT_TIME": lambda: int(
         os.getenv("LM_SERVICE_STARTUP_WAIT_TIME", "120")
+    ),
     "LM_SERVICE_REQUEST_TIMEOUT_SECONDS": lambda: int(
         os.getenv("LM_SERVICE_REQUEST_TIMEOUT_SECONDS", 120)
     ),
