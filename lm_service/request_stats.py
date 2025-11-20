@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 from dataclasses import dataclass
-from collections import defaultdict
 
 import zmq
 import zmq.asyncio
