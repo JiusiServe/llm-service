@@ -34,6 +34,7 @@ from lm_service.protocol.protocol import (
     RequestType,
     ResponseType,
     ServerType,
+    AutodiscoveryRequest,
 )
 from lm_service.request_stats import RequestStatsMonitor
 from lm_service.routing_logic import (
@@ -296,6 +297,7 @@ class Proxy(EngineClient):
             socket = self.ctx.socket(zmq.constants.PUSH)
             socket.connect(addr)
             to_sockets[addr] = socket
+            logger.info(f"Connected to worker {addr} success")
         return to_sockets
 
     async def _run_encode(
@@ -642,6 +644,33 @@ class Proxy(EngineClient):
                 )
             )
 
+    async def _autodiscovery_handler(
+        self, autodiscovery_req: AutodiscoveryRequest
+    ):
+        """Handle autodiscovery request."""
+        address = autodiscovery_req.address
+        server_type = autodiscovery_req.server_type
+
+        SERVER_TYPE_TO_SOCKET_MAP = {
+            ServerType.E_INSTANCE: self.to_encode_sockets,
+            ServerType.PD_INSTANCE: self.to_pd_sockets,
+            ServerType.P_INSTANCE: self.to_p_sockets,
+            ServerType.D_INSTANCE: self.to_d_sockets,
+        }
+        if server_type in SERVER_TYPE_TO_SOCKET_MAP:
+            socket_dict = SERVER_TYPE_TO_SOCKET_MAP[server_type]
+            if address not in socket_dict:
+                socket = self.ctx.socket(zmq.constants.PUSH)
+                socket.connect(address)
+                socket_dict[address] = socket
+        else:
+            logger.error(
+                f"_autodiscovery_handler fail, unknown server type {server_type}"
+            )
+            return
+
+        logger.info(f"Connected to worker {address} success")
+
     async def _run_output_handler(self) -> None:
         """Background task to pull responses and dispatch to request queues.
 
@@ -655,6 +684,7 @@ class Proxy(EngineClient):
         failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
+        autodiscovery_decoder = msgspec.msgpack.Decoder(AutodiscoveryRequest)
         try:
             socket = self.ctx.socket(zmq.constants.PULL)
             socket.bind(self.proxy_addr)
@@ -704,6 +734,7 @@ class Proxy(EngineClient):
                     HeartbeatResponse,
                     FailureResponse,
                     MetricsResponse,
+                    AutodiscoveryRequest,
                 ]
                 # TODO: maybe we can have a mapping from resp_type to prefill
                 if resp_type in (
@@ -718,6 +749,9 @@ class Proxy(EngineClient):
                     resp = failure_decoder.decode(payload)
                 elif resp_type == ResponseType.METRICS:
                     resp = metrics_decoder.decode(payload)
+                elif resp_type == RequestType.AUTODISCOVERY:
+                    resp = autodiscovery_decoder.decode(payload)
+                    asyncio.create_task(self._autodiscovery_handler(resp))
                 else:
                     raise RuntimeError(
                         f"Unknown response type from worker: {resp_type.decode()}"
@@ -727,6 +761,7 @@ class Proxy(EngineClient):
                     if resp_type not in (
                         ResponseType.HEARTBEAT,
                         ResponseType.METRICS,
+                        RequestType.AUTODISCOVERY,
                     ):
                         logger.warning(
                             "Request %s may have been aborted, ignore response.",

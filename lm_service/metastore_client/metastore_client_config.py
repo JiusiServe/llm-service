@@ -56,6 +56,9 @@ class MetastoreClientConfig:
     # Prefix to use for all keys stored in the metastore
     metastore_key_prefix: str = "lm_service"
 
+    # URL of the metastore service
+    metastore_url: Optional[str] = None
+
     # Database index to use in the metastore
     metastore_db: int = 0
 
@@ -70,6 +73,13 @@ class MetastoreClientConfig:
 
     # Path to the SSL CA certificate file (if SSL is enabled)
     metastore_ssl_cafile: Optional[str] = None
+    """
+    Path to the SSL CA certificate file (if SSL is enabled).
+    """
+    metastore_socket_timeout: int = 60
+    """
+    Timeout in seconds for socket operations.
+    """
 
 
 def json_to_metastore_config(
