@@ -9,8 +9,8 @@ import numpy as np
 from PIL import Image
 
 from vllm import SamplingParams
-from lm_service.apis.vllm.proxy import Proxy
 import vllm.envs as envs
+from lm_service.apis.vllm.proxy import Proxy
 import lm_service.envs as lm_service_envs
 
 parser = argparse.ArgumentParser()
@@ -112,7 +112,20 @@ async def main():
         if lm_service_envs.TIMECOUNT_ENABLED:
             # wait for logging
             await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
-            await p.log_metrics()
+            asyncio.create_task(p.log_metrics())
+        # test for exit_instance
+        pd_num = len(args.pd_addr_list)
+        exit_tasks = []
+        for i in range(pd_num):
+            exit_task = asyncio.create_task(
+                asyncio.wait_for(
+                    p.exit_instance(addr=args.pd_addr_list[i]),
+                    timeout=lm_service_envs.LM_SERVICE_WORKER_EXIT_TIMEOUT,
+                )
+            )
+            exit_tasks.append(exit_task)
+        if exit_tasks:
+            await asyncio.gather(*exit_tasks)
     finally:
         p.shutdown()
 

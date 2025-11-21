@@ -5,6 +5,7 @@ import asyncio
 import os
 import time
 from typing import Any, Optional, Union
+import uuid
 
 import msgspec
 import numpy as np
@@ -27,6 +28,7 @@ from lm_service.protocol.protocol import (
     MetricsResponse,
     RequestType,
     ResponseType,
+    ShutdownRequest,
     ServerType,
 )
 import lm_service.envs as lm_service_envs
@@ -120,10 +122,14 @@ class DisaggWorker:
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_metrics = msgspec.msgpack.Decoder(MetricsRequest)
         self.encoder = msgspec.msgpack.Encoder()
-
+        self.stopping = False  # whether the worker is stopping
         self.running_requests: set[asyncio.Task] = set()
 
     def shutdown(self):
+        for socket in self.to_proxy.values():
+            socket.close(
+                linger=lm_service_envs.LM_SERVICE_WORKER_EXIT_TIMEOUT * 1000
+            )
         self.ctx.destroy()
 
         for running_request in self.running_requests:
@@ -168,9 +174,43 @@ class DisaggWorker:
             task = asyncio.create_task(_force_log())
             self.running_requests.add(task)
             task.add_done_callback(self.running_requests.discard)
-        while True:
-            req_type, req_data = await self.from_proxy.recv_multipart()
-            await self._handle_request(req_type, req_data)
+        while not self.stopping:
+            # poll for requests from proxy
+            # if worker is stopping, exit the loop
+            try:
+                events = dict(
+                    await poller.poll(
+                        timeout=lm_service_envs.LM_SERVICE_WORKER_EXIT_TIMEOUT
+                        * 1000
+                        / 2
+                    )
+                )
+            except asyncio.CancelledError:
+                # When the worker is stopping, the poller may be cancelled.
+                # So we don't raise error.
+                # Just catch the exception and exit the loop
+                if self.stopping:
+                    logger.info("Poll cancelled due to worker shutdown.")
+                    break
+                raise
+            if self.stopping:
+                break
+            if not events:
+                continue
+            if self.from_proxy in events:
+                try:
+                    req_type, req_data = await self.from_proxy.recv_multipart()
+                except zmq.ZMQError:
+                    # When the worker is stopping, the socket may be closed.
+                    # So we don't raise error.
+                    if self.stopping:
+                        logger.info(
+                            "ZMQError received, shutting down DisaggWorker."
+                        )
+                        break
+                    raise
+                await self._handle_request(req_type, req_data)
+        logger.info("Worker loop stopped.")
 
     async def _handle_request(self, req_type: bytes, req_data: bytes):
         if req_type == RequestType.ENCODE:
@@ -193,6 +233,8 @@ class DisaggWorker:
         elif req_type == RequestType.METRICS:
             metrics_req = self.decoder_metrics.decode(req_data)
             await self._metrics_handler(metrics_req)
+        elif req_type == RequestType.EXIT:
+            await self._exit_handler()
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
@@ -256,6 +298,50 @@ class DisaggWorker:
             ),
         )
         await self._handle_response(req, msg)
+
+    # handle exit request from proxy
+    async def _exit_handler(self) -> None:
+        if self.stopping:
+            return
+        # set stopping flag to exit busy loop
+        self.stopping = True
+        # cancel all running requests
+        for t in list(self.running_requests):
+            t.cancel()
+        # wait for all running requests to finish
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self.running_requests, return_exceptions=True),
+                timeout=lm_service_envs.LM_SERVICE_WORKER_EXIT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Some tasks did not finish cleanup in %s.",
+                lm_service_envs.LM_SERVICE_WORKER_EXIT_TIMEOUT,
+            )
+        try:
+            self.from_proxy.close(linger=0)
+        except Exception:
+            logger.error("Error closing from_proxy socket during shutdown.")
+
+    # graceful shutdown on SIGTERM
+    async def _shutdown_handler(self, reason: str) -> None:
+        request_id = str(uuid.uuid4())
+        # send exit request to the proxy
+        msg = (
+            ResponseType.SIGTERM,
+            self.encoder.encode(
+                ShutdownRequest(
+                    request_id=request_id,
+                    addr=self.worker_addr,
+                    in_flight=len(self.running_requests),
+                    reason=reason,
+                )
+            ),
+        )
+        for socket in self.to_proxy.values():
+            await socket.send_multipart(msg, copy=False)
+        await self._exit_handler()
 
     async def _generate(
         self,

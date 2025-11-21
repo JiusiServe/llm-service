@@ -22,7 +22,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, get_ip, get_open_port
-
+from lm_service.protocol.protocol import ExitRequest
 from lm_service.protocol.protocol import (
     FailureResponse,
     GenerationRequest,
@@ -34,6 +34,7 @@ from lm_service.protocol.protocol import (
     RequestType,
     ResponseType,
     ServerType,
+    ShutdownRequest,
 )
 from lm_service.request_stats import RequestStatsMonitor
 from lm_service.routing_logic import (
@@ -667,6 +668,7 @@ class Proxy(EngineClient):
         failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
+        sigterm_decoder = msgspec.msgpack.Decoder(ShutdownRequest)
         try:
             socket = self.ctx.socket(zmq.constants.PULL)
             socket.bind(self.proxy_addr)
@@ -716,6 +718,7 @@ class Proxy(EngineClient):
                     HeartbeatResponse,
                     FailureResponse,
                     MetricsResponse,
+                    ShutdownRequest,
                 ]
                 # TODO: maybe we can have a mapping from resp_type to prefill
                 if resp_type in (
@@ -730,6 +733,9 @@ class Proxy(EngineClient):
                     resp = failure_decoder.decode(payload)
                 elif resp_type == ResponseType.METRICS:
                     resp = metrics_decoder.decode(payload)
+                elif resp_type == ResponseType.SIGTERM:
+                    resp = sigterm_decoder.decode(payload)
+                    asyncio.create_task(self.handle_sigterm_from_worker(resp))
                 else:
                     raise RuntimeError(
                         f"Unknown response type from worker: {resp_type.decode()}"
@@ -739,6 +745,7 @@ class Proxy(EngineClient):
                     if resp_type not in (
                         ResponseType.HEARTBEAT,
                         ResponseType.METRICS,
+                        ResponseType.SIGTERM,
                     ):
                         logger.warning(
                             "Request %s may have been aborted, ignore response.",
@@ -808,14 +815,8 @@ class Proxy(EngineClient):
         try:
             payload = self.encoder.encode(request)
             msg = (RequestType.HEARTBEAT, payload)
-            if server_type == ServerType.PD_INSTANCE:
-                socket = self.to_pd_sockets[addr]
-            elif server_type == ServerType.P_INSTANCE:
-                socket = self.to_p_sockets[addr]
-            elif server_type == ServerType.D_INSTANCE:
-                socket = self.to_d_sockets[addr]
-            elif server_type == ServerType.E_INSTANCE:
-                socket = self.to_encode_sockets[addr]
+            _, sockets = self._get_sockets_and_server_types_from_addr(addr)
+            socket = sockets[addr]
 
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
@@ -846,14 +847,8 @@ class Proxy(EngineClient):
         try:
             payload = self.encoder.encode(request)
             msg = (RequestType.METRICS, payload)
-            if server_type == ServerType.PD_INSTANCE:
-                socket = self.to_pd_sockets[addr]
-            elif server_type == ServerType.P_INSTANCE:
-                socket = self.to_p_sockets[addr]
-            elif server_type == ServerType.D_INSTANCE:
-                socket = self.to_d_sockets[addr]
-            elif server_type == ServerType.E_INSTANCE:
-                socket = self.to_encode_sockets[addr]
+            _, sockets = self._get_sockets_and_server_types_from_addr(addr)
+            socket = sockets[addr]
 
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
@@ -911,6 +906,92 @@ class Proxy(EngineClient):
         finally:
             self.queues.pop(request_id, None)
 
+    async def exit_instance(self, addr: str) -> None:
+        """
+        request the specified instance to exit gracefully:
+        1. add the instance to the draining set (stop routing new requests)
+        2. send EXIT request
+        3. the instance will remove itself from service discovery
+        """
+
+        # lazy initialization
+        if self.output_handler is None:
+            self.output_handler = asyncio.create_task(
+                self._run_output_handler()
+            )
+        if addr is None:
+            logger.warning(
+                "Exit instance failed, addr is None.",
+            )
+            return
+        worker_addr = (
+            f"{self.transfer_protocol}://{addr}"
+            if not addr.startswith(self.transfer_protocol)
+            else addr
+        )
+        server_type, sockets = self._get_sockets_and_server_types_from_addr(
+            worker_addr
+        )
+        socket = sockets.get(worker_addr, None)
+        if socket is None:
+            logger.warning(
+                "Exit instance failed for %s, addr %s not found.",
+                server_type,
+                worker_addr,
+            )
+            return
+        # Create exit request
+        request_id = str(uuid.uuid4())
+        request = ExitRequest(request_id=request_id)
+        try:
+            payload = self.encoder.encode(request)
+            msg = (RequestType.EXIT, payload)
+
+            await socket.send_multipart(msg, copy=False)
+            logger.info(
+                "Exit request sent to %s instance addr %s.",
+                server_type,
+                addr,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Exit instance failed, exception: %s" % (e)
+            ) from e
+        sockets.pop(worker_addr, None)  # stop routing new requests
+        node_key = (
+            f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{server_type.name}"
+        )
+        if (
+            lm_service_envs.LM_SERVICE_METASTORE_CLIENT is not None
+            and self.metastore_client
+        ):
+            self.metastore_client.delete_metadata(node_key, addr)
+
+    async def handle_sigterm_from_worker(self, req: ShutdownRequest) -> None:
+        # lazy initialization
+        if self.output_handler is None:
+            self.output_handler = asyncio.create_task(
+                self._run_output_handler()
+            )
+        # find instance id by addr, stop routing new requests to it
+        server_type, sockets = self._get_sockets_and_server_types_from_addr(
+            req.addr
+        )
+        sockets.pop(req.addr, None)  # stop routing new requests to it
+        if server_type is None:
+            logger.warning(
+                "Instance addr %s not found.",
+                req.addr,
+            )
+        else:
+            logger.info(
+                "Instance %s addr %s is exiting (reason=%s, in_flight=%d).",
+                server_type,
+                req.addr,
+                req.reason,
+                req.in_flight,
+            )
+
     async def _await_with_timeout(
         self,
         request_id: str,
@@ -966,6 +1047,21 @@ class Proxy(EngineClient):
 
     async def reset_mm_cache(self) -> None:
         raise NotImplementedError
+
+    def _get_sockets_and_server_types_from_addr(
+        self, addr: str
+    ) -> tuple[ServerType, dict[str, zmq.asyncio.Socket]]:
+        for server_type, sockets in [
+            (ServerType.PD_INSTANCE, self.to_pd_sockets),
+            (ServerType.P_INSTANCE, self.to_p_sockets),
+            (ServerType.D_INSTANCE, self.to_d_sockets),
+            (ServerType.E_INSTANCE, self.to_encode_sockets),
+        ]:
+            if addr in sockets:
+                return server_type, sockets
+        raise ValueError(
+            f"Address {addr} not found in any server type sockets."
+        )
 
 
 def _has_mm_data(prompt: PromptType) -> bool:
