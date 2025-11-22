@@ -64,6 +64,175 @@ ROUTER_MAP = {
     "LeastInFlightRouter": LeastInFlightRouter,
 }
 
+SERVER_PARAMS_MAP = {
+    ServerType.E_INSTANCE: {
+        "addr_list_name": "encode_addr_list",
+        "run_request_type": RequestType.ENCODE,
+    },
+    ServerType.P_INSTANCE: {
+        "addr_list_name": "p_encode_addr_list",
+        "run_request_type": RequestType.PREFILL,
+    },
+    ServerType.D_INSTANCE: {
+        "addr_list_name": "d_encode_addr_list",
+        "run_request_type": RequestType.GENERATION,
+    },
+    ServerType.PD_INSTANCE: {
+        "addr_list_name": "pd_addr_list",
+        "run_request_type": RequestType.GENERATION,
+    },
+}
+
+
+class InstanceCluster:
+    """
+    Encapsulates per-server-type runtime components.
+    """
+
+    def __init__(
+        self,
+        server_type,
+        sockets,
+        service_discovery,
+        stats_monitor,
+        router,
+        metrics_logger,
+    ):
+        self.server_type = server_type
+        self.sockets = sockets
+        self.service_discovery = service_discovery
+        self.stats_monitor = stats_monitor
+        self.router = router
+        self.metrics_logger = metrics_logger
+        self.encoder = msgspec.msgpack.Encoder()
+
+    def _prepare_run(self, request):
+        if not self.sockets:
+            raise RuntimeError(f"No available {self.server_type.name} workers.")
+
+        # encode payload
+        try:
+            payload = self.encoder.encode(request)
+        except Exception as e:
+            raise RuntimeError("Failed to serialize GenerationRequest") from e
+
+        msg = (SERVER_PARAMS_MAP[self.server_type]["run_request_type"], payload)
+        health_endpoints = self._get_health_endpoints()
+        request_stats = self.stats_monitor.get_request_stats()
+        # routing
+        addr = self.router.route_request(health_endpoints, request_stats)
+        return addr, msg
+
+    async def run_with_stream(self, request, q):
+        addr, msg = self._prepare_run(request)
+        self.stats_monitor.on_new_request(addr, request_id=request.request_id)
+        try:
+            socket = self.sockets[addr]
+            if lm_service_envs.TIMECOUNT_ENABLED:
+                start_time = time.perf_counter()
+            await socket.send_multipart(msg, copy=False)
+            finished = False
+            while not finished:
+                response = await self._await_with_timeout(request.request_id, q)
+                if isinstance(response, Exception):
+                    raise response
+                self._record_proxy_to_instance_time(addr, response, start_time)
+                finished = response.finish_reason is not None
+                yield response
+
+        finally:
+            self.stats_monitor.on_request_completed(
+                addr, request_id=request.request_id
+            )
+
+    async def run_without_stream(self, request, q):
+        addr, msg = self._prepare_run(request)
+        self.stats_monitor.on_new_request(addr, request_id=request.request_id)
+        try:
+            socket = self.sockets[addr]
+            if lm_service_envs.TIMECOUNT_ENABLED:
+                start_time = time.perf_counter()
+            await socket.send_multipart(msg, copy=False)
+            response = await self._await_with_timeout(request.request_id, q)
+            self._record_proxy_to_instance_time(addr, response, start_time)
+            if isinstance(response, Exception):
+                raise response
+        finally:
+            self.stats_monitor.on_request_completed(
+                addr, request_id=request.request_id
+            )
+
+    def _record_proxy_to_instance_time(self, addr, response, start_time):
+        if (
+            lm_service_envs.TIMECOUNT_ENABLED
+            and isinstance(response, GenerationResponse)
+            and response.proxy_to_worker_time_end
+            and start_time is not None
+        ):
+            self.metrics_logger.add_proxy_to_instance_time(
+                addr,
+                response.proxy_to_worker_time_end - start_time,
+            )
+
+    async def _await_with_timeout(
+        self,
+        request_id: str,
+        q: asyncio.Queue[Union[Exception, GenerationResponse]],
+    ) -> Union[Exception, GenerationResponse]:
+        """wait for response from queue with timeout handling."""
+        try:
+            resp = await asyncio.wait_for(
+                q.get(),
+                timeout=lm_service_envs.LM_SERVICE_REQUEST_TIMEOUT_SECONDS,
+            )
+            return resp
+        except asyncio.TimeoutError:
+            return RuntimeError(
+                f"Request {request_id} timed out "
+                f"after {lm_service_envs.LM_SERVICE_REQUEST_TIMEOUT_SECONDS}s "
+                f"without worker response."
+            )
+
+    def get_metrics(self):
+        return self.metrics_logger.get_metrics()
+
+    def _get_health_endpoints(self):
+        return self.service_discovery.get_health_endpoints()
+
+    def _route_request(self, health_endpoints, request_stats):
+        return self.router.route_request(health_endpoints, request_stats)
+
+    def lazy_init_health_monitor(self):
+        if self.should_launch_health_monitor():
+            self.launch_health_monitor()
+
+    def should_launch_health_monitor(self):
+        return self.service_discovery.should_launch_health_monitor()
+
+    def launch_health_monitor(self):
+        self.service_discovery.launch_health_monitor()
+
+    def get_unhealthy_endpoints(self):
+        return self.service_discovery.get_unhealth_endpoints()
+
+    def get_avg_proxy_ttft(self):
+        return self.metrics_logger.get_avg_proxy_ttft()
+
+    def cal_proxy_ttft(
+        self,
+        ttft_recorded_flag: bool,
+        proxy_ttft_start: float,
+        response: GenerationResponse,
+    ) -> bool:
+        return self.metrics_logger.cal_proxy_ttft(
+            ttft_recorded_flag,
+            proxy_ttft_start,
+            response,
+        )
+
+    def get_avg_proxy_to_instance_time(self, addr: str) -> float:
+        return self.metrics_logger.get_avg_proxy_to_instance_time(addr)
+
 
 class Proxy(EngineClient):
     """
@@ -85,28 +254,21 @@ class Proxy(EngineClient):
         transfer_protocol: Optional[str] = None,
         metastore_client_config: Optional[dict] = None,
     ):
+        init_params = locals()
+        self.instance_clusters: dict[ServerType, InstanceCluster] = {}
         self.queues: dict[str, asyncio.Queue] = {}
-
+        # This "Encoder" is used for handling message types, not for "Encode - Prefill - Decode"
         self.encoder = msgspec.msgpack.Encoder()
         self.transfer_protocol = (
             lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.ctx = zmq.asyncio.Context()
-        self.encoder_addr_list: list[str] = []
-        self.pd_addr_list: list[str] = []
-        self.p_addr_list: list[str] = []
-        self.d_addr_list: list[str] = []
-        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_p_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_d_sockets: dict[str, zmq.asyncio.Socket] = {}
         self.enable_health_monitor = enable_health_monitor
         self.health_check_interval = health_check_interval
         self.health_threshold = health_threshold
         self.output_handler: Optional[asyncio.Task] = None
         self.router = router
         self.is_pd_merged = True
-
         # Dummy: needed for EngineClient Protocol.
         self.model_config = ModelConfig(
             model=model_name,
@@ -146,93 +308,67 @@ class Proxy(EngineClient):
                 )
             )
             self.is_pd_merged = self.metastore_client.is_pd_merge
-        elif (
-            proxy_addr is None
-            or encode_addr_list is None
-            or (
-                pd_addr_list is None
-                and (p_addr_list is None or d_addr_list is None)
+        else:
+            self._validate_input_addr_and_judge_pd_merged(
+                proxy_addr=proxy_addr,
+                encode_addr_list=encode_addr_list,
+                pd_addr_list=pd_addr_list,
+                p_addr_list=p_addr_list,
+                d_addr_list=d_addr_list,
             )
+
+        # TODO : amy-why should confirm what is the proxy_addr ipv6 judging rule
+        self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
+        if is_addr_ipv6(self.proxy_addr) and self.transfer_protocol == "tcp":
+            self.ctx.setsockopt(zmq.constants.IPV6, 1)
+
+        for server_type in SERVER_PARAMS_MAP:
+            addr_param_name = SERVER_PARAMS_MAP[server_type]["addr_list_name"]
+            addr_list = init_params[str(addr_param_name)]
+            if addr_list is None:
+                continue
+
+            addr_list = [
+                f"{self.transfer_protocol}://{addr}" for addr in addr_list
+            ]
+            sockets = self.connect_to_socket(addr_list)
+            self._initialize_instance_clusters(server_type, sockets)
+
+    def _validate_input_addr_and_judge_pd_merged(
+        self,
+        proxy_addr,
+        encode_addr_list,
+        pd_addr_list,
+        p_addr_list,
+        d_addr_list,
+    ):
+        if not proxy_addr:
+            raise ValueError("proxy_addr must be provided")
+
+        if not encode_addr_list:
+            raise ValueError("encode_addr_list must be provided")
+
+        if pd_addr_list is not None and not p_addr_list and not d_addr_list:
+            self.is_pd_merged = True
+            return
+
+        if (
+            pd_addr_list is None
+            and p_addr_list is not None
+            and d_addr_list is not None
         ):
-            raise ValueError(
-                "proxy_addr, encode_addr_list, pd_addr_list must be provided"
-            )
-        else:
-            if pd_addr_list is None:
-                self.is_pd_merged = False
-            self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
-            if is_addr_ipv6(proxy_addr) and self.transfer_protocol == "tcp":
-                self.ctx.setsockopt(zmq.constants.IPV6, 1)
-            self.encoder_addr_list = [
-                f"{self.transfer_protocol}://{addr}"
-                for addr in encode_addr_list or []
-            ]
-            self.pd_addr_list = [
-                f"{self.transfer_protocol}://{addr}"
-                for addr in pd_addr_list or []
-            ]
-            self.p_addr_list = [
-                f"{self.transfer_protocol}://{addr}"
-                for addr in p_addr_list or []
-            ]
-            self.d_addr_list = [
-                f"{self.transfer_protocol}://{addr}"
-                for addr in d_addr_list or []
-            ]
-            self.to_encode_sockets = self.connect_to_socket(
-                self.encoder_addr_list
-            )
-            self.to_pd_sockets = self.connect_to_socket(self.pd_addr_list)
-            self.to_p_sockets = self.connect_to_socket(self.p_addr_list)
-            self.to_d_sockets = self.connect_to_socket(self.d_addr_list)
+            self.is_pd_merged = False
+            return
 
-        (
-            self.encoder_service_discovery,
-            self.encoder_metrics_logger,
-            self.encoder_request_stats_monitor,
-            self.encoder_router,
-        ) = self._initialize_instance_clusters(
-            ServerType.E_INSTANCE,
-            self.to_encode_sockets,
+        raise ValueError(
+            "Either pd_addr_list or both p_addr_list and d_addr_list must be provided"
         )
-
-        if self.is_pd_merged:
-            (
-                self.pd_service_discovery,
-                self.pd_metrics_logger,
-                self.pd_request_stats_monitor,
-                self.pd_router,
-            ) = self._initialize_instance_clusters(
-                ServerType.PD_INSTANCE, self.to_pd_sockets
-            )
-        else:
-            (
-                self.p_service_discovery,
-                self.p_metrics_logger,
-                self.p_request_stats_monitor,
-                self.p_router,
-            ) = self._initialize_instance_clusters(
-                ServerType.P_INSTANCE, self.to_p_sockets
-            )
-            (
-                self.d_service_discovery,
-                self.d_metrics_logger,
-                self.d_request_stats_monitor,
-                self.d_router,
-            ) = self._initialize_instance_clusters(
-                ServerType.D_INSTANCE, self.to_d_sockets
-            )
 
     def _initialize_instance_clusters(
         self,
         engine_type: ServerType,
         socket_dict: dict[str, zmq.asyncio.Socket],
-    ) -> tuple[
-        HealthCheckServiceDiscovery,
-        MetricsReporter,
-        RequestStatsMonitor,
-        RoutingInterface,
-    ]:
+    ):
         service_discovery = HealthCheckServiceDiscovery(
             server_type=engine_type,
             instances=socket_dict,
@@ -252,11 +388,13 @@ class Proxy(EngineClient):
             ROUTER_MAP.get(getattr(lm_service_envs, route_policy), None)
             or self.router
         )()
-        return (
-            service_discovery,
-            metrics_logger,
-            request_stats_monitor,
-            instance_router,
+        self.instance_clusters[engine_type] = InstanceCluster(
+            server_type=engine_type,
+            sockets=socket_dict,
+            service_discovery=service_discovery,
+            stats_monitor=request_stats_monitor,
+            router=instance_router,
+            metrics_logger=metrics_logger,
         )
 
     def shutdown(self):
@@ -272,12 +410,12 @@ class Proxy(EngineClient):
 
     async def log_metrics(self) -> None:
         if self.is_pd_merged:
-            await self.pd_metrics_logger.get_metrics()
+            await self.instance_clusters[ServerType.PD_INSTANCE].get_metrics()
         else:
-            await self.p_metrics_logger.get_metrics()
-            await self.d_metrics_logger.get_metrics()
+            await self.instance_clusters[ServerType.P_INSTANCE].get_metrics()
+            await self.instance_clusters[ServerType.D_INSTANCE].get_metrics()
 
-        await self.encoder_metrics_logger.get_metrics()
+        await self.instance_clusters[ServerType.E_INSTANCE].get_metrics()
 
     def connect_to_socket(
         self, addr_list: list[str]
@@ -298,213 +436,25 @@ class Proxy(EngineClient):
             to_sockets[addr] = socket
         return to_sockets
 
-    async def _run_encode(
+    # TODO : we split the _run method into 2 methods for better readability
+    # Since we need two ways, one is stream output and the other is not
+    async def _run_without_stream(
         self,
-        request: GenerationRequest,
-        q: asyncio.Queue[Union[Exception, GenerationResponse]],
-    ) -> None:
-        """
-        Send the encode request to one encoder worker.
-        The encoder worker is selected based on hashing the request ID.
-        """
-        if not self.to_encode_sockets:
-            raise RuntimeError(
-                "No encode workers configured: encode_addr_list is empty."
-            )
-
-        try:
-            payload = self.encoder.encode(request)
-        except Exception as e:
-            raise RuntimeError("Failed to serialize GenerationRequest") from e
-
-        msg = (RequestType.ENCODE, payload)
-        health_endpoints = self.encoder_service_discovery.get_health_endpoints()
-        request_stats = self.encoder_request_stats_monitor.get_request_stats()
-        addr = self.encoder_router.route_request(
-            health_endpoints, request_stats
-        )
-        self.encoder_request_stats_monitor.on_new_request(
-            addr, request_id=request.request_id
-        )
-        try:
-            socket = self.to_encode_sockets[addr]
-            if lm_service_envs.TIMECOUNT_ENABLED:
-                proxy_to_encode_time_start = time.perf_counter()
-            await socket.send_multipart(msg, copy=False)
-            response = await self._await_with_timeout(request.request_id, q)
-            if (
-                lm_service_envs.TIMECOUNT_ENABLED
-                and isinstance(response, GenerationResponse)
-                and response.proxy_to_worker_time_end
-            ):
-                self.encoder_metrics_logger.add_proxy_to_instance_time(
-                    addr,
-                    response.proxy_to_worker_time_end
-                    - proxy_to_encode_time_start,
-                )
-
-            if isinstance(response, Exception):
-                raise response
-        finally:
-            self.encoder_request_stats_monitor.on_request_completed(
-                addr, request_id=request.request_id
-            )
-
-    async def _run_pd(
-        self,
+        server_type: ServerType,
         request: GenerationRequest,
         q: asyncio.Queue[Union[Exception, GenerationResponse]],
     ):
-        """
-        Send the generation request to a PD worker and yield its response.
-        The PD worker is selected based on hashing the request ID.
-        """
-        if not self.to_pd_sockets:
-            raise RuntimeError(
-                "No PD workers configured: pd_addr_list is empty."
-            )
+        cluster = self.instance_clusters[server_type]
+        await cluster.run_without_stream(request, q)
 
-        try:
-            payload = self.encoder.encode(request)
-        except Exception as e:
-            raise RuntimeError("Failed to serialize GenerationRequest") from e
-
-        msg = (RequestType.GENERATION, payload)
-        health_endpoints = self.pd_service_discovery.get_health_endpoints()
-        request_stats = self.pd_request_stats_monitor.get_request_stats()
-        addr = self.pd_router.route_request(health_endpoints, request_stats)
-        self.pd_request_stats_monitor.on_new_request(
-            addr, request_id=request.request_id
-        )
-
-        try:
-            socket = self.to_pd_sockets[addr]
-            if lm_service_envs.TIMECOUNT_ENABLED:
-                proxy_to_pd_time_start = time.perf_counter()
-            await socket.send_multipart(msg, copy=False)
-            finished = False
-            while not finished:
-                response = await self._await_with_timeout(request.request_id, q)
-                if isinstance(response, Exception):
-                    raise response
-                if (
-                    lm_service_envs.TIMECOUNT_ENABLED
-                    and isinstance(response, GenerationResponse)
-                    and response.proxy_to_worker_time_end
-                ):
-                    self.pd_metrics_logger.add_proxy_to_instance_time(
-                        addr,
-                        response.proxy_to_worker_time_end
-                        - proxy_to_pd_time_start,  # type: ignore
-                    )
-                finished = response.finish_reason is not None
-                yield response
-        finally:
-            self.pd_request_stats_monitor.on_request_completed(
-                addr, request_id=request.request_id
-            )
-
-    async def _run_prefill(
+    async def _run_with_stream(
         self,
+        server_type: ServerType,
         request: GenerationRequest,
         q: asyncio.Queue[Union[Exception, GenerationResponse]],
     ):
-        """
-        Send the prefill request to one encoder worker.
-        """
-        if not self.to_p_sockets:
-            raise RuntimeError(
-                "No Prefill workers configured: p_addr_list is empty."
-            )
-
-        try:
-            payload = self.encoder.encode(request)
-        except Exception as e:
-            raise RuntimeError("Failed to serialize GenerationRequest") from e
-
-        msg = (RequestType.PREFILL, payload)
-        health_endpoints = self.p_service_discovery.get_health_endpoints()
-        request_stats = self.p_request_stats_monitor.get_request_stats()
-        addr = self.p_router.route_request(health_endpoints, request_stats)
-        self.p_request_stats_monitor.on_new_request(
-            addr, request_id=request.request_id
-        )
-
-        try:
-            socket = self.to_p_sockets[addr]
-            if lm_service_envs.TIMECOUNT_ENABLED:
-                proxy_to_p_time_start = time.perf_counter()
-            await socket.send_multipart(msg, copy=False)
-            response = await self._await_with_timeout(request.request_id, q)
-            if (
-                lm_service_envs.TIMECOUNT_ENABLED
-                and isinstance(response, GenerationResponse)
-                and response.proxy_to_worker_time_end
-            ):
-                self.p_metrics_logger.add_proxy_to_instance_time(
-                    addr,
-                    response.proxy_to_worker_time_end - proxy_to_p_time_start,  # type: ignore
-                )
-
-            if isinstance(response, Exception):
-                raise response
-        finally:
-            self.p_request_stats_monitor.on_request_completed(
-                addr, request_id=request.request_id
-            )
-
-    async def _run_decode(
-        self,
-        request: GenerationRequest,
-        q: asyncio.Queue[Union[Exception, GenerationResponse]],
-    ):
-        """
-        Send the generation request to a decode worker and yield its response.
-        """
-        if not self.to_d_sockets:
-            raise RuntimeError(
-                "No Decode workers configured: d_addr_list is empty."
-            )
-
-        try:
-            payload = self.encoder.encode(request)
-        except Exception as e:
-            raise RuntimeError("Failed to serialize GenerationRequest") from e
-
-        msg = (RequestType.GENERATION, payload)
-        health_endpoints = self.d_service_discovery.get_health_endpoints()
-        request_stats = self.d_request_stats_monitor.get_request_stats()
-        addr = self.d_router.route_request(health_endpoints, request_stats)
-        self.d_request_stats_monitor.on_new_request(
-            addr, request_id=request.request_id
-        )
-
-        try:
-            socket = self.to_d_sockets[addr]
-            if lm_service_envs.TIMECOUNT_ENABLED:
-                proxy_to_d_time_start = time.perf_counter()
-            await socket.send_multipart(msg, copy=False)
-            finished = False
-            while not finished:
-                response = await self._await_with_timeout(request.request_id, q)
-                if isinstance(response, Exception):
-                    raise response
-                if (
-                    lm_service_envs.TIMECOUNT_ENABLED
-                    and isinstance(response, GenerationResponse)
-                    and response.proxy_to_worker_time_end
-                ):
-                    self.d_metrics_logger.add_proxy_to_instance_time(
-                        addr,
-                        response.proxy_to_worker_time_end
-                        - proxy_to_d_time_start,  # type: ignore
-                    )
-                finished = response.finish_reason is not None
-                yield response
-        finally:
-            self.d_request_stats_monitor.on_request_completed(
-                addr, request_id=request.request_id
-            )
+        cluster = self.instance_clusters[server_type]
+        yield cluster.run_with_stream(request, q)
 
     def _to_request_output(self, resp: GenerationResponse) -> RequestOutput:
         """Convert a PD/Generate response to vLLM RequestOutput.
@@ -548,17 +498,10 @@ class Proxy(EngineClient):
             self.output_handler = asyncio.create_task(
                 self._run_output_handler()
             )
-        if self.encoder_service_discovery.should_launch_health_monitor():
-            self.encoder_service_discovery.launch_health_monitor()
-        # PD-merged or not
-        if self.is_pd_merged:
-            if self.pd_service_discovery.should_launch_health_monitor():
-                self.pd_service_discovery.launch_health_monitor()
-        else:
-            if self.p_service_discovery.should_launch_health_monitor():
-                self.p_service_discovery.launch_health_monitor()
-            if self.d_service_discovery.should_launch_health_monitor():
-                self.d_service_discovery.launch_health_monitor()
+
+        # lazy init all health monitors
+        for cluster in self.instance_clusters.values():
+            cluster.lazy_init_health_monitor()
 
         if not request_id:
             request_id = uuid.uuid4().hex
@@ -590,21 +533,31 @@ class Proxy(EngineClient):
                 request.multi_modal_data = _encode_mm_data(
                     prompt["multi_modal_data"]
                 )
-                await self._run_encode(request, q)
+                await self._run_without_stream(
+                    ServerType.E_INSTANCE, request, q
+                )
 
             if self.is_pd_merged:
-                async for pd_response in self._run_pd(request, q):
+                pd_cluster = self.instance_clusters[ServerType.PD_INSTANCE]
+                async for pd_response in self._run_with_stream(
+                    ServerType.PD_INSTANCE, request, q
+                ):
                     yield self._to_request_output(pd_response)
-                    ttft_recorded_flag = self.pd_metrics_logger.cal_proxy_ttft(
+                    ttft_recorded_flag = pd_cluster.cal_proxy_ttft(
                         ttft_recorded_flag,
                         proxy_ttft_start,
                         pd_response,
                     )
             else:
-                await self._run_prefill(request, q)
-                async for d_response in self._run_decode(request, q):
+                await self._run_without_stream(
+                    ServerType.P_INSTANCE, request, q
+                )
+                d_cluster = self.instance_clusters[ServerType.D_INSTANCE]
+                async for d_response in self._run_with_stream(
+                    ServerType.D_INSTANCE, request, q
+                ):
                     yield self._to_request_output(d_response)
-                    ttft_recorded_flag = self.d_metrics_logger.cal_proxy_ttft(
+                    ttft_recorded_flag = d_cluster.cal_proxy_ttft(
                         ttft_recorded_flag,
                         proxy_ttft_start,
                         d_response,
@@ -637,22 +590,22 @@ class Proxy(EngineClient):
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def add_unhealthy_task(
-        self,
-        engine_type: ServerType,
-        discovery: HealthCheckServiceDiscovery,
-        request_stats_monitor: RequestStatsMonitor,
-        tasks: list[Any],
-    ) -> None:
-        unhealthy_endpoints = discovery.get_unhealth_endpoints()
-        if unhealthy_endpoints:
-            tasks.append(
-                self.abort_requests_from_unhealth_endpoints(
-                    server_type=engine_type,
-                    unhealth_endpoints=unhealthy_endpoints,
-                    request_stats_monitor=request_stats_monitor,
-                )
-            )
+    def get_unhealthy_task(self, engine_type):
+        """Return a Task to abort requests from unhealthy endpoints.
+
+        If there are no unhealthy endpoints, return None.
+        """
+        cluster = self.instance_clusters[engine_type]
+        unhealthy_endpoints = cluster.get_unhealthy_endpoints()
+
+        if not unhealthy_endpoints:
+            return None  # nothing to do
+
+        return self.abort_requests_from_unhealth_endpoints(
+            server_type=engine_type,
+            unhealth_endpoints=unhealthy_endpoints,
+            request_stats_monitor=cluster.stats_monitor,
+        )
 
     async def _run_output_handler(self) -> None:
         """Background task to pull responses and dispatch to request queues.
@@ -663,78 +616,51 @@ class Proxy(EngineClient):
         keyed by request_id.
         """
         socket: Optional[zmq.asyncio.Socket] = None
-        decoder = msgspec.msgpack.Decoder(GenerationResponse)
-        failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
+
+        # prepare decoders once
+        gen_decoder = msgspec.msgpack.Decoder(GenerationResponse)
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
+        failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
+
+        resp_type_decoder_map = {
+            ResponseType.GENERATION: gen_decoder,
+            ResponseType.ENCODE: gen_decoder,
+            ResponseType.PREFILL: gen_decoder,
+            ResponseType.HEARTBEAT: heartbeat_decoder,
+            ResponseType.FAILURE: failure_decoder,
+            ResponseType.METRICS: metrics_decoder,
+        }
+
+        timeout = self.health_check_interval * self.health_threshold / 2
+
         try:
-            socket = self.ctx.socket(zmq.constants.PULL)
+            socket = self.ctx.socket(zmq.PULL)
             socket.bind(self.proxy_addr)
-            timeout = self.health_check_interval * self.health_threshold / 2
 
             while True:
-                tasks: list[asyncio.Task] = []
-                self.add_unhealthy_task(
-                    engine_type=ServerType.E_INSTANCE,
-                    discovery=self.encoder_service_discovery,
-                    request_stats_monitor=self.encoder_request_stats_monitor,
-                    tasks=tasks,
-                )
-                if self.is_pd_merged:
-                    self.add_unhealthy_task(
-                        engine_type=ServerType.PD_INSTANCE,
-                        discovery=self.pd_service_discovery,
-                        request_stats_monitor=self.pd_request_stats_monitor,
-                        tasks=tasks,
-                    )
-                else:
-                    self.add_unhealthy_task(
-                        engine_type=ServerType.P_INSTANCE,
-                        discovery=self.p_service_discovery,
-                        request_stats_monitor=self.p_request_stats_monitor,
-                        tasks=tasks,
-                    )
-                    self.add_unhealthy_task(
-                        engine_type=ServerType.D_INSTANCE,
-                        discovery=self.d_service_discovery,
-                        request_stats_monitor=self.d_request_stats_monitor,
-                        tasks=tasks,
-                    )
-
+                # ---- health check tasks ----
+                tasks = [
+                    t
+                    for server_type in self.instance_clusters
+                    if (t := self.get_unhealthy_task(server_type)) is not None
+                ]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Check if the engine is alive:
-                if not await socket.poll(timeout=timeout):
+                # ---- no response from workers ----
+                if not await socket.poll(timeout):
                     continue
-                resp_type, payload = await socket.recv_multipart()
 
-                # Decode response according to its type.
-                # TODO : judge whether we need to add PREFILL response type
-                resp: Union[
-                    GenerationResponse,
-                    HeartbeatResponse,
-                    FailureResponse,
-                    MetricsResponse,
-                ]
-                # TODO: maybe we can have a mapping from resp_type to prefill
-                if resp_type in (
-                    ResponseType.GENERATION,
-                    ResponseType.ENCODE,
-                    ResponseType.PREFILL,
-                ):
-                    resp = decoder.decode(payload)
-                elif resp_type == ResponseType.HEARTBEAT:
-                    resp = heartbeat_decoder.decode(payload)
-                elif resp_type == ResponseType.FAILURE:
-                    resp = failure_decoder.decode(payload)
-                elif resp_type == ResponseType.METRICS:
-                    resp = metrics_decoder.decode(payload)
-                else:
+                # ---- receive and decode ----
+                resp_type, payload = await socket.recv_multipart()
+                decoder = resp_type_decoder_map.get(resp_type)
+                if decoder is None:
                     raise RuntimeError(
                         f"Unknown response type from worker: {resp_type.decode()}"
                     )
 
+                resp = decoder.decode(payload)
                 if resp.request_id not in self.queues:
                     if resp_type not in (
                         ResponseType.HEARTBEAT,
@@ -756,6 +682,7 @@ class Proxy(EngineClient):
             # For now, if there is any error, we terminate all requests.
             for q in self.queues.values():
                 q.put_nowait(e)
+
         finally:
             if socket is not None:
                 socket.close(linger=0)
@@ -808,15 +735,7 @@ class Proxy(EngineClient):
         try:
             payload = self.encoder.encode(request)
             msg = (RequestType.HEARTBEAT, payload)
-            if server_type == ServerType.PD_INSTANCE:
-                socket = self.to_pd_sockets[addr]
-            elif server_type == ServerType.P_INSTANCE:
-                socket = self.to_p_sockets[addr]
-            elif server_type == ServerType.D_INSTANCE:
-                socket = self.to_d_sockets[addr]
-            elif server_type == ServerType.E_INSTANCE:
-                socket = self.to_encode_sockets[addr]
-
+            socket = self.instance_clusters[server_type].sockets[addr]
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             if (
@@ -846,15 +765,8 @@ class Proxy(EngineClient):
         try:
             payload = self.encoder.encode(request)
             msg = (RequestType.METRICS, payload)
-            if server_type == ServerType.PD_INSTANCE:
-                socket = self.to_pd_sockets[addr]
-            elif server_type == ServerType.P_INSTANCE:
-                socket = self.to_p_sockets[addr]
-            elif server_type == ServerType.D_INSTANCE:
-                socket = self.to_d_sockets[addr]
-            elif server_type == ServerType.E_INSTANCE:
-                socket = self.to_encode_sockets[addr]
-
+            cluster = self.instance_clusters[server_type]
+            socket = cluster.sockets[addr]
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             # calculate proxy to pd/encode time
@@ -865,30 +777,14 @@ class Proxy(EngineClient):
                 # calculate proxy to pd/encode time average
                 # add to metrics
                 proxy_ttft_avg: float = 0.0
-                if server_type == ServerType.E_INSTANCE:
-                    proxy2instance_avg = self.encoder_metrics_logger.get_avg_proxy_to_instance_time(
-                        addr
-                    )
-                elif server_type == ServerType.PD_INSTANCE:
-                    proxy2instance_avg = (
-                        self.pd_metrics_logger.get_avg_proxy_to_instance_time(
-                            addr
-                        )
-                    )
-                    proxy_ttft_avg = self.pd_metrics_logger.get_avg_proxy_ttft()
-                elif server_type == ServerType.P_INSTANCE:
-                    proxy2instance_avg = (
-                        self.p_metrics_logger.get_avg_proxy_to_instance_time(
-                            addr
-                        )
-                    )
-                elif server_type == ServerType.D_INSTANCE:
-                    proxy2instance_avg = (
-                        self.d_metrics_logger.get_avg_proxy_to_instance_time(
-                            addr
-                        )
-                    )
-                    proxy_ttft_avg = self.d_metrics_logger.get_avg_proxy_ttft()
+                proxy2instance_avg: float = (
+                    cluster.get_avg_proxy_to_instance_time(addr)
+                )
+                if server_type in [
+                    ServerType.PD_INSTANCE,
+                    ServerType.D_INSTANCE,
+                ]:
+                    proxy_ttft_avg = cluster.get_avg_proxy_ttft()
                 for engine_id in response.metrics:
                     response.metrics[engine_id].update(
                         {
@@ -910,25 +806,6 @@ class Proxy(EngineClient):
             ) from e
         finally:
             self.queues.pop(request_id, None)
-
-    async def _await_with_timeout(
-        self,
-        request_id: str,
-        q: asyncio.Queue[Union[Exception, GenerationResponse]],
-    ) -> Union[Exception, GenerationResponse]:
-        """wait for response from queue with timeout handling."""
-        try:
-            resp = await asyncio.wait_for(
-                q.get(),
-                timeout=lm_service_envs.LM_SERVICE_REQUEST_TIMEOUT_SECONDS,
-            )
-            return resp
-        except asyncio.TimeoutError:
-            return RuntimeError(
-                f"Request {request_id} timed out "
-                f"after {lm_service_envs.LM_SERVICE_REQUEST_TIMEOUT_SECONDS}s "
-                f"without worker response."
-            )
 
     async def start_profile(self) -> None:
         raise NotImplementedError
