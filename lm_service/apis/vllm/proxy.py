@@ -501,32 +501,18 @@ class Proxy(EngineClient):
         keyed by request_id.
         """
         socket: Optional[zmq.asyncio.Socket] = None
-
-        # prepare decoders once
-        gen_decoder = msgspec.msgpack.Decoder(GenerationResponse)
-        heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
+        decoder = msgspec.msgpack.Decoder(GenerationResponse)
         failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
+        heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
         worker_register_decoder = msgspec.msgpack.Decoder(WorkerRegisterRequest)
 
-        resp_type_decoder_map = {
-            ResponseType.GENERATION: gen_decoder,
-            ResponseType.ENCODE: gen_decoder,
-            ResponseType.PREFILL: gen_decoder,
-            ResponseType.HEARTBEAT: heartbeat_decoder,
-            ResponseType.FAILURE: failure_decoder,
-            ResponseType.METRICS: metrics_decoder,
-            RequestType.REGISTER: worker_register_decoder,
-        }
-
-        timeout = self.health_check_interval * self.health_threshold / 2
-
         try:
-            socket = self.ctx.socket(zmq.PULL)
+            socket = self.ctx.socket(zmq.constants.PULL)
             socket.bind(self.proxy_addr)
+            timeout = self.health_check_interval * self.health_threshold / 2
 
             while True:
-                # ---- health check tasks ----
                 tasks = [
                     t
                     for server_type in self.instance_clusters
@@ -535,17 +521,10 @@ class Proxy(EngineClient):
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
-                # ---- no response from workers ----
-                if not await socket.poll(timeout):
+                # Check if the engine is alive:
+                if not await socket.poll(timeout=timeout):
                     continue
-
-                # ---- receive and decode ----
                 resp_type, payload = await socket.recv_multipart()
-                decoder = resp_type_decoder_map[resp_type]
-                if decoder is None:
-                    raise RuntimeError(
-                        f"Unknown response type from worker: {resp_type.decode()}"
-                    )
 
                 # Decode response according to its type.
                 # TODO : judge whether we need to add PREFILL response type
@@ -556,9 +535,27 @@ class Proxy(EngineClient):
                     MetricsResponse,
                     WorkerRegisterRequest,
                 ]
-                resp = decoder.decode(payload)
-                if resp_type == RequestType.REGISTER:
+                # TODO: maybe we can have a mapping from resp_type to prefill
+                if resp_type in (
+                    ResponseType.GENERATION,
+                    ResponseType.ENCODE,
+                    ResponseType.PREFILL,
+                ):
+                    resp = decoder.decode(payload)
+                elif resp_type == ResponseType.HEARTBEAT:
+                    resp = heartbeat_decoder.decode(payload)
+                elif resp_type == ResponseType.FAILURE:
+                    resp = failure_decoder.decode(payload)
+                elif resp_type == ResponseType.METRICS:
+                    resp = metrics_decoder.decode(payload)
+                elif resp_type == RequestType.REGISTER:
+                    resp = worker_register_decoder.decode(payload)
                     asyncio.create_task(self._worker_register_handler(resp))
+                else:
+                    raise RuntimeError(
+                        f"Unknown response type from worker: {resp_type.decode()}"
+                    )
+
                 if resp.request_id not in self.queues:
                     if resp_type not in (
                         ResponseType.HEARTBEAT,
@@ -581,7 +578,6 @@ class Proxy(EngineClient):
             # For now, if there is any error, we terminate all requests.
             for q in self.queues.values():
                 q.put_nowait(e)
-
         finally:
             if socket is not None:
                 socket.close(linger=0)
