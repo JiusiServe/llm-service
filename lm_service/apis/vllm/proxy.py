@@ -34,6 +34,7 @@ from lm_service.protocol.protocol import (
     RequestType,
     ResponseType,
     ServerType,
+    WorkerRegisterRequest,
 )
 from lm_service.request_stats import RequestStatsMonitor
 from lm_service.routing_logic import (
@@ -272,6 +273,7 @@ class Proxy(EngineClient):
             socket = self.ctx.socket(zmq.constants.PUSH)
             socket.connect(addr)
             to_sockets[addr] = socket
+            logger.info(f"Connected to worker {addr} success")
         return to_sockets
 
     async def _run_without_stream(
@@ -444,6 +446,38 @@ class Proxy(EngineClient):
             request_stats_monitor=cluster.stats_monitor,
         )
 
+    async def _worker_register_handler(
+        self, worker_register_req: WorkerRegisterRequest
+    ):
+        """Handle worker register request."""
+        address = worker_register_req.address
+        server_type = worker_register_req.server_type
+
+        SERVER_TYPE_TO_SOCKET_MAP = {
+            ServerType.E_INSTANCE: self.to_encode_sockets,
+            ServerType.PD_INSTANCE: self.to_pd_sockets,
+            ServerType.P_INSTANCE: self.to_p_sockets,
+            ServerType.D_INSTANCE: self.to_d_sockets,
+        }
+        if server_type in SERVER_TYPE_TO_SOCKET_MAP:
+            socket_dict = SERVER_TYPE_TO_SOCKET_MAP[server_type]
+            if address not in socket_dict:
+                try:
+                    socket = self.ctx.socket(zmq.constants.PUSH)
+                    socket.connect(address)
+                    socket_dict[address] = socket
+                except zmq.ZMQError as e:
+                    logger.error(
+                        f"Failed to connect to worker {address} with error: {e}"
+                    )
+        else:
+            logger.error(
+                f"_worker_register_handler fail, unknown server type {server_type}"
+            )
+            return
+
+        logger.info(f"Connected to worker {address} success")
+
     async def _run_output_handler(self) -> None:
         """Background task to pull responses and dispatch to request queues.
 
@@ -459,6 +493,7 @@ class Proxy(EngineClient):
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
         failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
+        worker_register_decoder = msgspec.msgpack.Decoder(WorkerRegisterRequest)
 
         resp_type_decoder_map = {
             ResponseType.GENERATION: gen_decoder,
@@ -496,12 +531,25 @@ class Proxy(EngineClient):
                     raise RuntimeError(
                         f"Unknown response type from worker: {resp_type.decode()}"
                     )
+                # Decode response according to its type.
+                # TODO : judge whether we need to add PREFILL response type
+                resp: Union[
+                    GenerationResponse,
+                    HeartbeatResponse,
+                    FailureResponse,
+                    MetricsResponse,
+                    WorkerRegisterRequest,
+                ]
+                    resp = worker_register_decoder.decode(payload)
 
                 resp = decoder.decode(payload)
+                if resp_type == WorkerRegisterRequest:
+                    asyncio.create_task(self._worker_register_handler(resp))
                 if resp.request_id not in self.queues:
                     if resp_type not in (
                         ResponseType.HEARTBEAT,
                         ResponseType.METRICS,
+                        RequestType.REGISTER,
                     ):
                         logger.warning(
                             "Request %s may have been aborted, ignore response.",

@@ -44,20 +44,11 @@ class MetastoreClientConfig:
     """
     The type of the metastore service to use.
     """
-    # Host address of the metastore service
-    metastore_host: Optional[str] = None
-
-    # Port number of the metastore service
-    metastore_port: Optional[int] = None
-
-    # Password for authenticating with the metastore service
-    metastore_password: str = ""
+    # address of the metastore service
+    metastore_address: Optional[str] = None
 
     # Prefix to use for all keys stored in the metastore
     metastore_key_prefix: str = "lm_service"
-
-    # Database index to use in the metastore
-    metastore_db: int = 0
 
     # Whether to use SSL for the connection
     metastore_ssl: bool = False
@@ -70,6 +61,9 @@ class MetastoreClientConfig:
 
     # Path to the SSL CA certificate file (if SSL is enabled)
     metastore_ssl_cafile: Optional[str] = None
+
+    # Timeout in seconds for socket operations
+    metastore_socket_timeout: int = 60
 
 
 def json_to_metastore_config(

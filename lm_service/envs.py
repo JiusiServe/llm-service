@@ -35,11 +35,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "RandomRouter",
         ["RandomRouter", "RoundRobinRouter", "LeastInFlightRouter"],
     ),
-    "LM_SERVICE_REDIS_IP": lambda: os.getenv(
-        "LM_SERVICE_REDIS_IP", "localhost"
-    ),
-    "LM_SERVICE_REDIS_PORT": lambda: int(
-        os.getenv("LM_SERVICE_REDIS_PORT", "6379")
+    "LM_SERVICE_REDIS_ADDRESS": lambda: os.getenv(
+        "LM_SERVICE_REDIS_ADDRESS", None
     ),
     "LM_SERVICE_REDIS_DB": lambda: int(os.getenv("LM_SERVICE_REDIS_DB", "0")),
     "LM_SERVICE_REDIS_PASSWORD": lambda: os.getenv(
@@ -53,6 +50,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "LM_SERVICE_REDIS_KEY_TTL": lambda: int(
         os.getenv("LM_SERVICE_REDIS_KEY_TTL", "600")
+    ),
+    "LM_SERVICE_SOCKET_TIMEOUT": lambda: int(
+        os.getenv("LM_SERVICE_SOCKET_TIMEOUT", "60")
     ),
     "LM_SERVICE_RPC_PORT": lambda: os.getenv("LM_SERVICE_RPC_PORT", None),
     "LM_SERVICE_METASTORE_CLIENT": lambda: os.getenv(

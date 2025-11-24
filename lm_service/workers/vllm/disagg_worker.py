@@ -4,6 +4,7 @@
 import asyncio
 import os
 import time
+import uuid
 from typing import Any, Optional, Union
 
 import msgspec
@@ -28,6 +29,7 @@ from lm_service.protocol.protocol import (
     RequestType,
     ResponseType,
     ServerType,
+    WorkerRegisterRequest,
 )
 import lm_service.envs as lm_service_envs
 from lm_service.metastore_client.factory import (
@@ -64,6 +66,7 @@ class DisaggWorker:
         )
         self.ec_transfer_config = ec_transfer_config
         self.kv_transfer_config = kv_transfer_config
+        self.server_type = self.get_server_type()
         self.to_proxy: dict[str, zmq.asyncio.Socket] = {}
         self.metastore_client: Optional[MetastoreClientBase] = None
         if (
@@ -89,7 +92,7 @@ class DisaggWorker:
             self.metastore_client = (
                 MetastoreClientFactory.create_metastore_client(
                     config=config,
-                    engine_type=self.get_server_type().value,
+                    engine_type=self.server_type.value,
                     node_info=self.worker_addr,
                     to_proxy=self.to_proxy,
                 )
@@ -153,11 +156,39 @@ class DisaggWorker:
         else:
             return ServerType.PROXY
 
+    async def _send_worker_register_request(
+        self, socket_list: list[zmq.asyncio.Socket]
+    ):
+        """Handle worker register request."""
+        for socket in socket_list:
+            request_id = str(uuid.uuid4())
+            msg = (
+                RequestType.REGISTER,
+                self.encoder.encode(
+                    WorkerRegisterRequest(
+                        request_id=request_id,
+                        server_type=self.server_type,
+                        address=self.worker_addr,
+                    )
+                ),
+            )
+            await socket.send_multipart(msg)
+            logger.info(
+                f"Worker {self.worker_addr} sent worker register request to proxy"
+            )
+
     async def run_busy_loop(self):
         logger.info("DisaggWorker is ready To handle requests.")
 
         poller = zmq.asyncio.Poller()
         poller.register(self.from_proxy, zmq.POLLIN)
+        if self.metastore_client is None:
+            discovery_task = asyncio.create_task(
+                self._send_worker_register_request(self.to_proxy.values())
+            )
+            self.running_requests.add(discovery_task)
+            discovery_task.add_done_callback(self.running_requests.discard)
+
         if lm_service_envs.TIMECOUNT_ENABLED:
             # log engine stats (logger stats and EPD stats (if enabled))
             async def _force_log():
@@ -205,17 +236,9 @@ class DisaggWorker:
 
     async def _handle_response(self, req, msg):
         if req.proxy_addr not in self.to_proxy:
-            if self.metastore_client is None:
-                logger.error(
-                    f"request {req.request_id} could not find proxy address {req.proxy_addr}."
-                )
-                return
-            await self.metastore_client.async_update_proxy_sockets()
-            if req.proxy_addr not in self.to_proxy:
-                logger.error(
-                    f"request {req.request_id} could not find proxy address {req.proxy_addr}."
-                )
-                return
+            socket = self.ctx.socket(zmq.constants.PUSH)
+            socket.connect(req.proxy_addr)
+            self.to_proxy[req.proxy_addr] = socket
 
         await self.to_proxy[req.proxy_addr].send_multipart(msg, copy=False)
 

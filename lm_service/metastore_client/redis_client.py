@@ -65,31 +65,19 @@ class RedisMetastoreClient(MetastoreClientBase):
             to_p_sockets,
             to_d_sockets,
         )
-        self.host = (
-            lm_service_envs.LM_SERVICE_REDIS_IP
-            or metastore_client_config.metastore_host
-            if metastore_client_config is not None
-            else None
-        )
-        self.port = (
-            lm_service_envs.LM_SERVICE_REDIS_PORT
-            or metastore_client_config.metastore_port
-            if metastore_client_config is not None
-            else None
-        )
-        self.db = (
-            lm_service_envs.LM_SERVICE_REDIS_DB
-            or metastore_client_config.metastore_db
-            if metastore_client_config is not None
-            else None
-        )
-        self.password = (
-            lm_service_envs.LM_SERVICE_REDIS_PASSWORD
-            or metastore_client_config.metastore_password
-            if metastore_client_config is not None
-            else None
-        )
 
+        def _get_config_value(env_var, config_attr):
+            return env_var or getattr(
+                metastore_client_config, config_attr, None
+            )
+
+        self.address = _get_config_value(
+            lm_service_envs.LM_SERVICE_REDIS_ADDRESS, "metastore_address"
+        )
+        self.socket_timeout = _get_config_value(
+            lm_service_envs.LM_SERVICE_SOCKET_TIMEOUT,
+            "metastore_socket_timeout",
+        )
         self.redis_client = None  # Synchronous client
         self.async_redis_client = None  # Asynchronous client
         self.ctx = zmq.asyncio.Context()
@@ -109,9 +97,6 @@ class RedisMetastoreClient(MetastoreClientBase):
             asyncio.create_task(
                 self.save_metadata_async(self.node_key, self.node_info, "0")
             )
-        )
-        logger.info(
-            f"Redis client initialized with host={self.host}, port={self.port}, password={'***' if self.password else 'None'}"
         )
         logger.info(
             f"Node {self.node_info} registered to Redis key {self.node_key}"
@@ -171,24 +156,17 @@ class RedisMetastoreClient(MetastoreClientBase):
         Initialize Redis client connections
         """
         try:
-            # Initialize synchronous Redis client
-            self.redis_client = redis.Redis(
-                host=self.host,
-                port=self.port,
-                db=self.db,
-                password=self.password,
+            self.redis_client = redis.Redis.from_url(
+                self.address,
+                socket_timeout=self.socket_timeout,
+                decode_responses=True,
+            )
+            self.async_redis_client = redis_async.Redis.from_url(
+                self.address,
+                socket_timeout=self.socket_timeout,
                 decode_responses=True,
             )
             self.redis_client.ping()  # Test connection
-
-            self.async_redis_client = redis_async.Redis(
-                host=self.host,
-                port=self.port,
-                db=self.db,
-                password=self.password,
-                decode_responses=True,
-            )
-
             # We'll test the async connection later in an async context
             logger.info("Redis clients initialized successfully")
 

@@ -29,6 +29,7 @@ class RequestType:
     HEARTBEAT = b"\x03"
     METRICS = b"\x04"
     PREFILL = b"\x05"
+    REGISTER = b"\x06"
 
 
 class PDAbortRequest(msgspec.Struct):
@@ -42,6 +43,7 @@ class ResponseType:
     HEARTBEAT = b"\x03"
     METRICS = b"\x04"
     PREFILL = b"\x05"
+    REGISTER = b"\x06"
 
 
 class GenerationResponse(msgspec.Struct):
@@ -102,3 +104,9 @@ class MetricsRequest(msgspec.Struct):
 class MetricsResponse(msgspec.Struct):
     request_id: str
     metrics: Optional[dict[int, dict[str, Union[int, float]]]]
+
+
+class WorkerRegisterRequest(msgspec.Struct):
+    request_id: str
+    server_type: ServerType
+    address: str
