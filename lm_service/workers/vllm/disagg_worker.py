@@ -76,7 +76,7 @@ class DisaggWorker:
             config: MetastoreClientConfig = json_to_metastore_config(
                 metastore_client_config
             )
-            worker_ip = get_ip()
+            worker_ip = lm_service_envs.LM_SERVICE_HOST_IP or get_ip()
             worker_port = (
                 int(lm_service_envs.LM_SERVICE_RPC_PORT)
                 if lm_service_envs.LM_SERVICE_RPC_PORT

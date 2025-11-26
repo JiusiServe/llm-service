@@ -135,7 +135,7 @@ class Proxy(EngineClient):
             config: MetastoreClientConfig = json_to_metastore_config(
                 metastore_client_config
             )
-            local_ip = get_ip()
+            local_ip = lm_service_envs.LM_SERVICE_HOST_IP or get_ip()
             proxy_port = (
                 int(lm_service_envs.LM_SERVICE_RPC_PORT)
                 if lm_service_envs.LM_SERVICE_RPC_PORT
