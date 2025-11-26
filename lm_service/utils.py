@@ -15,5 +15,7 @@ def is_addr_ipv6(addr: str | None) -> bool:
     """
     if addr is None:
         raise RuntimeError("addr must not be None. ")
-    ipv6_pattern = r"^\[(.*?)\]:(\d+)$"
+    # Support addresses with protocol prefix like "tcp://[::1]:8090"
+    # Match protocol prefix (optional), IPv6 address in square brackets, and port (optional)
+    ipv6_pattern = r"^(?:[a-zA-Z0-9]+://)?\[([0-9a-fA-F:]+)\](?::(\d+))?$"
     return bool(re.match(ipv6_pattern, addr))

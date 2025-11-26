@@ -480,6 +480,7 @@ class Proxy(EngineClient):
                     socket = self.ctx.socket(zmq.constants.PUSH)
                     socket.connect(address)
                     socket_dict[address] = socket
+                    logger.info(f"Connected to worker {address} success")
                 except zmq.ZMQError as e:
                     logger.error(
                         f"Failed to connect to worker {address} with error: {e}"
@@ -489,8 +490,6 @@ class Proxy(EngineClient):
                 f"_worker_register_handler fail, unknown server type {server_type}"
             )
             return
-
-        logger.info(f"Connected to worker {address} success")
 
     async def _run_output_handler(self) -> None:
         """Background task to pull responses and dispatch to request queues.

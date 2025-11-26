@@ -17,7 +17,7 @@ from lm_service.metastore_client.metastore_client import MetastoreClientBase
 from lm_service.metastore_client.metastore_client_config import (
     MetastoreClientConfig,
 )
-
+from lm_service.utils import is_addr_ipv6
 
 logger = init_logger(__name__)
 
@@ -81,6 +81,8 @@ class RedisMetastoreClient(MetastoreClientBase):
         self.redis_client = None  # Synchronous client
         self.async_redis_client = None  # Asynchronous client
         self.ctx = zmq.asyncio.Context()
+        if is_addr_ipv6(self.node_info):
+            self.ctx.setsockopt(zmq.constants.IPV6, 1)
 
         self.node_key = (
             f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{self.engine_type}"
@@ -93,11 +95,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             raise RuntimeError("Redis client initialization failed")
         self.async_task: list[asyncio.Task] = []
         # Start a task to save metadata asynchronously without blocking initialization
-        self.async_task.append(
-            asyncio.create_task(
-                self.save_metadata_async(self.node_key, self.node_info, "0")
-            )
-        )
+        self.async_task.append(asyncio.create_task(self._report_node_info()))
         logger.info(
             f"Node {self.node_info} registered to Redis key {self.node_key}"
         )
@@ -137,14 +135,6 @@ class RedisMetastoreClient(MetastoreClientBase):
                     )
                 )
         else:
-            if self.engine_type != ServerType.E_INSTANCE.value:
-                self.async_task.append(
-                    asyncio.create_task(
-                        self.save_metadata_async(
-                            self.server_key, self.node_key, "0"
-                        )
-                    )
-                )
             self.async_task.append(
                 asyncio.create_task(
                     self.async_update_socket(ServerType.PROXY.value, interval)
@@ -189,16 +179,18 @@ class RedisMetastoreClient(MetastoreClientBase):
                 logger.error("Synchronous Redis client not initialized")
                 return False
             retry_times = lm_service_envs.LM_SERVICE_STARTUP_WAIT_TIME
+            e_node_key = f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{ServerType.E_INSTANCE.value}"
             pd_node_key = f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{ServerType.PD_INSTANCE.value}"
             p_node_key = f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{ServerType.P_INSTANCE.value}"
             d_node_key = f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{ServerType.D_INSTANCE.value}"
             for _ in range(retry_times):
                 deploy_form = self.get_metadata(self.server_key)
-                if pd_node_key in deploy_form.keys():
+                if e_node_key in deploy_form and pd_node_key in deploy_form:
                     return True
                 elif (
-                    p_node_key in deploy_form.keys()
-                    and d_node_key in deploy_form.keys()
+                    e_node_key in deploy_form
+                    and p_node_key in deploy_form
+                    and d_node_key in deploy_form
                 ):
                     return False
                 time.sleep(1)
@@ -240,7 +232,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             return False
 
     async def save_metadata_async(
-        self, key: str, field: str, value: Any
+        self, key: str, field: str, value: Any, ttl: Optional[int] = None
     ) -> Optional[bool]:
         """
         Asynchronously set Redis key-value pair
@@ -249,6 +241,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             key: Key name
             field: Field name
             value: Value (will be converted to string)
+            ttl: Optional TTL in seconds, default is None
 
         Returns:
             bool: Whether the setting was successful
@@ -260,9 +253,8 @@ class RedisMetastoreClient(MetastoreClientBase):
             # Ensure value is a string
             value_str = str(value)
             await self.async_redis_client.hset(key, field, value_str)
-            await self.async_redis_client.expire(
-                key, lm_service_envs.LM_SERVICE_REDIS_KEY_TTL
-            )
+            if ttl:
+                await self.async_redis_client.expire(key, ttl)
             logger.debug(f"Redis key set successfully (async): {key}")
             return True
         except Exception as e:
@@ -523,3 +515,27 @@ class RedisMetastoreClient(MetastoreClientBase):
                 + list(self.to_proxy.values())
             ):
                 socket.close()
+
+    async def _report_node_info(self) -> None:
+        """
+        Report node info to Redis
+
+        Args:
+            node_info: Node info string
+            interval: Report interval in seconds
+        """
+        try:
+            ttl = lm_service_envs.LM_SERVICE_REDIS_KEY_TTL
+            interval = lm_service_envs.LM_SERVICE_REDIS_KEY_TTL / 2
+            while True:
+                await self.save_metadata_async(
+                    self.server_key, self.node_key, "0", ttl
+                )
+                await self.save_metadata_async(
+                    self.node_key, self.node_info, "0", ttl
+                )
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            await self.delete_metadata_async(self.server_key, self.node_info)
+            await self.delete_metadata_async(self.node_key, self.node_info)
+            logger.info("Node info report task cancelled")
