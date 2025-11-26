@@ -80,6 +80,8 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
         logger.info("Health monitor for %s launched.", self.server_type)
 
     def get_health_endpoints(self) -> list[str]:
+        if not self.enable_health_monitor:
+            return list(self._instances.keys())
         if not self._cached_health_instances:
             self._update_health_status()
         return self._cached_health_instances

@@ -54,6 +54,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LM_SERVICE_SOCKET_TIMEOUT": lambda: int(
         os.getenv("LM_SERVICE_SOCKET_TIMEOUT", "60")
     ),
+    "LM_SERVICE_HOST_IP": lambda: os.getenv("LM_SERVICE_HOST_IP", None),
     "LM_SERVICE_RPC_PORT": lambda: os.getenv("LM_SERVICE_RPC_PORT", None),
     "LM_SERVICE_METASTORE_CLIENT": lambda: os.getenv(
         "LM_SERVICE_METASTORE_CLIENT", None
