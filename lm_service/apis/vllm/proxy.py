@@ -801,7 +801,7 @@ class Proxy(EngineClient):
         if socket:
             return socket
         raise ValueError(
-            f"Address {addr} not found in any server type sockets."
+            f"Address {addr} not found in any {server_type.name} sockets."
         )
 
     async def _remove_instance_from_registry(
