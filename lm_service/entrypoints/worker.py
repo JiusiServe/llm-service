@@ -4,6 +4,7 @@
 import signal
 import json
 
+import asyncio
 import uvloop
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -22,10 +23,18 @@ logger = init_logger(__name__)
 async def run(args, engine: EngineClient):
     logger.info("Initializing disaggregated worker")
 
-    def signal_handler(*_):
-        raise SystemExit()
+    # Signal handler used for graceful termination.
+    # SystemExit exception is only raised once to allow this and worker
+    # processes to terminate without error
+    loop = asyncio.get_event_loop()
+    exit_exiting = asyncio.Event()
 
-    signal.signal(signal.SIGTERM, signal_handler)
+    async def do_graceful_exit():
+        if exit_exiting.is_set():
+            return
+        exit_exiting.set()
+        logger.info("Shutdown requested by signal.")
+        await worker._shutdown_handler("SIGTERM received")
 
     worker = DisaggWorker(
         engine=engine,
@@ -35,6 +44,10 @@ async def run(args, engine: EngineClient):
         metastore_client_config=args.metastore_client_config,
         ec_transfer_config=args.ec_transfer_config,
         kv_transfer_config=args.kv_transfer_config,
+    )
+
+    loop.add_signal_handler(
+        signal.SIGTERM, lambda: asyncio.create_task(do_graceful_exit())
     )
 
     try:

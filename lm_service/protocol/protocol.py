@@ -30,6 +30,7 @@ class RequestType:
     METRICS = b"\x04"
     PREFILL = b"\x05"
     REGISTER = b"\x06"
+    EXIT = b"\x07"
 
 
 class PDAbortRequest(msgspec.Struct):
@@ -104,6 +105,15 @@ class MetricsRequest(msgspec.Struct):
 class MetricsResponse(msgspec.Struct):
     request_id: str
     metrics: Optional[dict[int, dict[str, Union[int, float]]]]
+
+
+# message to request graceful shutdown
+class ExitRequest(msgspec.Struct):
+    request_id: str
+    reason: str
+    addr: str
+    server_type: ServerType
+    in_flight: int
 
 
 class WorkerRegisterRequest(msgspec.Struct):

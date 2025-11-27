@@ -44,6 +44,7 @@ class InstanceCluster:
         stats_monitor,
         router,
         metrics_logger,
+        socket_lock,
     ):
         self.server_type = server_type
         self.sockets = sockets
@@ -52,8 +53,9 @@ class InstanceCluster:
         self.router = router
         self.metrics_logger = metrics_logger
         self.encoder = msgspec.msgpack.Encoder()
+        self.socket_lock = socket_lock
 
-    def _prepare_run(self, request):
+    def _prepare_msg(self, request):
         if not self.sockets:
             raise RuntimeError(f"No available {self.server_type.name} workers.")
 
@@ -64,17 +66,21 @@ class InstanceCluster:
             raise RuntimeError("Failed to serialize GenerationRequest") from e
 
         msg = (SERVER_PARAMS_MAP[self.server_type]["run_request_type"], payload)
-        health_endpoints = self._get_health_endpoints()
-        request_stats = self.stats_monitor.get_request_stats()
-        # routing
-        addr = self.router.route_request(health_endpoints, request_stats)
-        return addr, msg
+
+        return msg
 
     async def run_with_stream(self, request, q):
-        addr, msg = self._prepare_run(request)
-        self.stats_monitor.on_new_request(addr, request_id=request.request_id)
-        try:
+        msg = self._prepare_msg(request)
+        async with self.socket_lock:
+            health_endpoints = self._get_health_endpoints()
+            request_stats = self.stats_monitor.get_request_stats()
+            addr = self._route_request(health_endpoints, request_stats)
+            self.stats_monitor.on_new_request(
+                addr, request_id=request.request_id
+            )
             socket = self.sockets[addr]
+
+        try:
             start_time = (
                 time.perf_counter()
                 if lm_service_envs.TIMECOUNT_ENABLED
@@ -96,10 +102,17 @@ class InstanceCluster:
             )
 
     async def run_without_stream(self, request, q):
-        addr, msg = self._prepare_run(request)
-        self.stats_monitor.on_new_request(addr, request_id=request.request_id)
-        try:
+        msg = self._prepare_msg(request)
+        async with self.socket_lock:
+            health_endpoints = self._get_health_endpoints()
+            request_stats = self.stats_monitor.get_request_stats()
+            addr = self._route_request(health_endpoints, request_stats)
+            self.stats_monitor.on_new_request(
+                addr, request_id=request.request_id
+            )
             socket = self.sockets[addr]
+
+        try:
             start_time = (
                 time.perf_counter()
                 if lm_service_envs.TIMECOUNT_ENABLED

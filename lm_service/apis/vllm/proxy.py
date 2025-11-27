@@ -24,6 +24,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, get_ip, get_open_port
 
 from lm_service.protocol.protocol import (
+    ExitRequest,
     FailureResponse,
     GenerationRequest,
     GenerationResponse,
@@ -96,6 +97,11 @@ class Proxy(EngineClient):
             lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.ctx = zmq.asyncio.Context()
+        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = {}
+        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = {}
+        self.to_p_sockets: dict[str, zmq.asyncio.Socket] = {}
+        self.to_d_sockets: dict[str, zmq.asyncio.Socket] = {}
+
         self.enable_health_monitor = enable_health_monitor
         self.health_check_interval = health_check_interval
         self.health_threshold = health_threshold
@@ -118,11 +124,6 @@ class Proxy(EngineClient):
             metastore_client_config is not None
             or lm_service_envs.LM_SERVICE_METASTORE_CLIENT is not None
         )
-
-        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_p_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_d_sockets: dict[str, zmq.asyncio.Socket] = {}
 
         self.server_to_socket_map = {
             ServerType.E_INSTANCE: self.to_encode_sockets,
@@ -208,7 +209,7 @@ class Proxy(EngineClient):
         if not encode_addr_list:
             raise ValueError("encode_addr_list must be provided")
 
-        self.is_pd_merged = pd_addr_list is not None
+        self.is_pd_merged = pd_addr_list is not None and len(pd_addr_list) > 0
 
         if self.is_pd_merged:
             if p_addr_list or d_addr_list:
@@ -228,6 +229,7 @@ class Proxy(EngineClient):
         engine_type: ServerType,
         socket_dict: dict[str, zmq.asyncio.Socket],
     ):
+        lock = asyncio.Lock()
         service_discovery = HealthCheckServiceDiscovery(
             server_type=engine_type,
             instances=socket_dict,
@@ -235,6 +237,7 @@ class Proxy(EngineClient):
             health_check_interval=self.health_check_interval,
             health_threshold=self.health_threshold,
             health_check_func=self.check_health,
+            lock=lock,
         )
         metrics_logger = MetricsReporter(
             server_type=engine_type,
@@ -254,6 +257,7 @@ class Proxy(EngineClient):
             stats_monitor=request_stats_monitor,
             router=instance_router,
             metrics_logger=metrics_logger,
+            socket_lock=lock,
         )
 
     def shutdown(self):
@@ -479,12 +483,15 @@ class Proxy(EngineClient):
                 try:
                     socket = self.ctx.socket(zmq.constants.PUSH)
                     socket.connect(address)
-                    socket_dict[address] = socket
-                    logger.info(f"Connected to worker {address} success")
                 except zmq.ZMQError as e:
                     logger.error(
                         f"Failed to connect to worker {address} with error: {e}"
                     )
+                    return
+                cluster_lock = self.instance_clusters[server_type].socket_lock
+                async with cluster_lock:
+                    socket_dict[address] = socket
+                    logger.info(f"Connected to worker {address} success")
         else:
             logger.error(
                 f"_worker_register_handler fail, unknown server type {server_type}"
@@ -504,6 +511,7 @@ class Proxy(EngineClient):
         failure_decoder = msgspec.msgpack.Decoder(FailureResponse)
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
+        exit_decoder = msgspec.msgpack.Decoder(ExitRequest)
         worker_register_decoder = msgspec.msgpack.Decoder(WorkerRegisterRequest)
 
         try:
@@ -532,6 +540,7 @@ class Proxy(EngineClient):
                     HeartbeatResponse,
                     FailureResponse,
                     MetricsResponse,
+                    ExitRequest,
                     WorkerRegisterRequest,
                 ]
                 # TODO: maybe we can have a mapping from resp_type to prefill
@@ -547,6 +556,9 @@ class Proxy(EngineClient):
                     resp = failure_decoder.decode(payload)
                 elif resp_type == ResponseType.METRICS:
                     resp = metrics_decoder.decode(payload)
+                elif resp_type == RequestType.EXIT:
+                    resp = exit_decoder.decode(payload)
+                    self.create_handle_exit_task(resp)
                 elif resp_type == RequestType.REGISTER:
                     resp = worker_register_decoder.decode(payload)
                     asyncio.create_task(self._worker_register_handler(resp))
@@ -629,7 +641,9 @@ class Proxy(EngineClient):
         try:
             payload = self.encoder.encode(request)
             msg = (RequestType.HEARTBEAT, payload)
-            socket = self.instance_clusters[server_type].sockets[addr]
+            socket = await self._get_socket_and_server_types_from_addr(
+                addr, server_type
+            )
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             if (
@@ -660,7 +674,9 @@ class Proxy(EngineClient):
             payload = self.encoder.encode(request)
             msg = (RequestType.METRICS, payload)
             cluster = self.instance_clusters[server_type]
-            socket = cluster.sockets[addr]
+            socket = await self._get_socket_and_server_types_from_addr(
+                addr, server_type
+            )
             await socket.send_multipart(msg, copy=False)
             response = await q.get()
             # calculate proxy to pd/encode time
@@ -701,6 +717,41 @@ class Proxy(EngineClient):
         finally:
             self.queues.pop(request_id, None)
 
+    async def handle_exit_from_worker(self, req: ExitRequest) -> None:
+        # lazy initialization
+        if self.output_handler is None:
+            self.output_handler = asyncio.create_task(
+                self._run_output_handler()
+            )
+        server_type = req.server_type
+
+        # stop routing new requests to it
+        if req.addr and server_type:
+            await self._remove_instance_from_registry(req.addr, server_type)
+        else:
+            logger.warning(
+                "Exit instance handling failed, addr or server_type is None.",
+            )
+            return
+        logger.info(
+            "Instance %s addr %s is exiting (reason=%s, in_flight=%d).",
+            server_type,
+            req.addr,
+            req.reason,
+            req.in_flight,
+        )
+
+    def create_handle_exit_task(self, resp: ExitRequest) -> None:
+        task = asyncio.create_task(self.handle_exit_from_worker(resp))
+        task.add_done_callback(
+            lambda t: logger.error(
+                "Exception in handle_exit_from_worker: %s",
+                t.exception(),
+            )
+            if t.exception() is not None and not t.cancelled()
+            else None
+        )
+
     async def start_profile(self) -> None:
         raise NotImplementedError
 
@@ -737,6 +788,27 @@ class Proxy(EngineClient):
 
     async def reset_mm_cache(self) -> None:
         raise NotImplementedError
+
+    async def _get_socket_and_server_types_from_addr(
+        self,
+        addr: str,
+        server_type: ServerType,
+    ) -> zmq.asyncio.Socket:
+        cluster = self.instance_clusters[server_type]
+        cluster_lock = cluster.socket_lock
+        async with cluster_lock:
+            socket = cluster.sockets.get(addr)
+        if socket:
+            return socket
+        raise ValueError(
+            f"Address {addr} not found in any server type sockets."
+        )
+
+    async def _remove_instance_from_registry(
+        self, addr: str, server_type: ServerType
+    ) -> None:
+        cluster = self.instance_clusters[server_type]
+        await cluster.service_discovery.remove_instance(addr)
 
 
 def _has_mm_data(prompt: PromptType) -> bool:
