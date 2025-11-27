@@ -83,7 +83,7 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
 
     def get_health_endpoints(self) -> list[str]:
         if not self.enable_health_monitor:
-            return list(self._instances.keys())
+            return [addr for addr in self._instances.keys()]
         if not self._cached_health_instances:
             self._update_health_status()
         return self._cached_health_instances
@@ -120,6 +120,7 @@ class HealthCheckServiceDiscovery(ServiceDiscovery):
                     )
             async with self._lock:
                 self._update_health_status()
+
             elapsed = time.monotonic() - start_time
             sleep_time = max(0, self._health_check_interval - elapsed)
             await asyncio.sleep(sleep_time)

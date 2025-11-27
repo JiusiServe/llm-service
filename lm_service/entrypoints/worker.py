@@ -11,7 +11,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
-
 from lm_service.stats_loggers import DisaggWorkerStatsLogger
 from lm_service.workers.vllm.disagg_worker import DisaggWorker
 import lm_service.envs as lm_service_envs

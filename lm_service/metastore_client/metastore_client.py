@@ -45,6 +45,18 @@ class MetastoreClientBase(ABC):
             to_d_sockets if to_d_sockets is not None else {}
         )
 
+    def close(self):
+        """
+        Close metastore client
+        """
+        pass
+
+    def async_close(self):
+        """
+        Close metastore client asynchronously
+        """
+        pass
+
     def save_metadata(self, key: str, field: str, value: Any) -> Optional[bool]:
         """
         Save metadata to metastore

@@ -375,6 +375,8 @@ class RedisMetastoreClient(MetastoreClientBase):
                 self.redis_client.close()
                 logger.info("Synchronous Redis connection closed")
 
+            self.ctx.destroy()
+
             # For async client, we should close it in an async context
             # This is just a placeholder; the actual closing should be done in an async method
             if self.async_redis_client:

@@ -9,8 +9,8 @@ import numpy as np
 from PIL import Image
 
 from vllm import SamplingParams
-from lm_service.apis.vllm.proxy import Proxy
 import vllm.envs as envs
+from lm_service.apis.vllm.proxy import Proxy
 import lm_service.envs as lm_service_envs
 
 parser = argparse.ArgumentParser()
@@ -112,7 +112,7 @@ async def main():
         if lm_service_envs.TIMECOUNT_ENABLED:
             # wait for logging
             await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
-            await p.log_metrics()
+            asyncio.create_task(p.log_metrics())
     finally:
         p.shutdown()
 
