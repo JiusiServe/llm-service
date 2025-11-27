@@ -9,8 +9,8 @@ import numpy as np
 from PIL import Image
 
 from vllm import SamplingParams
-from lm_service.apis.vllm.proxy import Proxy
 import vllm.envs as envs
+from lm_service.apis.vllm.proxy import Proxy
 import lm_service.envs as lm_service_envs
 
 PROXY_NUM = 1

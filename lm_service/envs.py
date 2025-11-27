@@ -10,6 +10,7 @@ _TRUE_VALUES = {"1", "true", "t", "y", "yes", "on"}
 
 # --8<-- [start:env-vars-definition]
 environment_variables: dict[str, Callable[[], Any]] = {
+    # Enable timecount profiling
     "TIMECOUNT_ENABLED": lambda: os.getenv("TIMECOUNT_ENABLED", "0").lower()
     in _TRUE_VALUES,
     "TRANSFER_PROTOCOL": env_with_choices(

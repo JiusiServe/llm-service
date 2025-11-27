@@ -148,6 +148,8 @@ class DisaggWorker:
         )
         if self.transfer_protocol == "ipc" and os.path.exists(socket_path):
             os.remove(socket_path)
+        if self.metastore_client is not None:
+            self.metastore_client.close()
 
     def get_server_type(self) -> ServerType:
         if (
