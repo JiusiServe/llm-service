@@ -3,6 +3,12 @@
 from typing import Union
 import asyncio
 import time
+import zmq
+import zmq.asyncio
+from lm_service.request_stats import RequestStatsMonitor
+from lm_service.routing_logic import RoutingInterface
+from lm_service.service_discovery import HealthCheckServiceDiscovery
+from lm_service.stats_loggers import MetricsReporter
 import msgspec
 import lm_service.envs as lm_service_envs
 from lm_service.protocol.protocol import (
@@ -38,13 +44,13 @@ class InstanceCluster:
 
     def __init__(
         self,
-        server_type,
-        sockets,
-        service_discovery,
-        stats_monitor,
-        router,
-        metrics_logger,
-        socket_lock,
+        server_type: ServerType,
+        sockets: dict[str, zmq.asyncio.Socket],
+        service_discovery: HealthCheckServiceDiscovery,
+        stats_monitor: RequestStatsMonitor,
+        router: RoutingInterface,
+        metrics_logger: MetricsReporter,
+        socket_lock: asyncio.Lock,
     ):
         self.server_type = server_type
         self.sockets = sockets

@@ -459,7 +459,7 @@ class Proxy(EngineClient):
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def get_unhealthy_task(self, engine_type):
+    def add_unhealthy_task(self, engine_type, tasks):
         """Return a Task to abort requests from unhealthy endpoints.
 
         If there are no unhealthy endpoints, return None.
@@ -468,12 +468,14 @@ class Proxy(EngineClient):
         unhealthy_endpoints = cluster.get_unhealthy_endpoints()
 
         if not unhealthy_endpoints:
-            return None  # nothing to do
+            return
 
-        return self.abort_requests_from_unhealth_endpoints(
-            server_type=engine_type,
-            unhealth_endpoints=unhealthy_endpoints,
-            request_stats_monitor=cluster.stats_monitor,
+        tasks.append(
+            self.abort_requests_from_unhealth_endpoints(
+                server_type=engine_type,
+                unhealth_endpoints=unhealthy_endpoints,
+                request_stats_monitor=cluster.stats_monitor,
+            )
         )
 
     async def _worker_register_handler(
@@ -526,11 +528,11 @@ class Proxy(EngineClient):
             timeout = self.health_check_interval * self.health_threshold / 2
 
             while True:
-                tasks = [
-                    t
-                    for server_type in self.instance_clusters
-                    if (t := self.get_unhealthy_task(server_type)) is not None
-                ]
+                # To kill the failed requests quickly, we check unhealthy endpoints
+                tasks: list[asyncio.Task] = []
+                for engine_type in self.instance_clusters:
+                    self.add_unhealthy_task(engine_type, tasks)
+
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
 
