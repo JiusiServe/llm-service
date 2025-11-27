@@ -37,6 +37,9 @@ class KvawareRouter(Router):
         idx = self._route_by_queue_len(endpoints)
         return self._create_nonworkload_route(task, endpoints[idx])
 
+    def batch_route(self, tasks: List[Task], endpoints: List[Endpoint]) -> List[TaskRoute]:
+        return [self.route(task, endpoints) for task in tasks]
+
     def _query_cache_hit(self, prompt_tokens: List[int], cache_instance_ids: Set[str]):
         hit_lens = self._balancer.kv_connector.query_hit_len(prompt_tokens, cache_instance_ids)
         if not hit_lens:

@@ -1,4 +1,5 @@
 from typing import Tuple, List
+import numpy as np
 
 from ..common import Stage
 from ..task import Task
@@ -45,6 +46,34 @@ class DecodeRouter(Router):
                            num_prompt_tokens=num_prompt_tokens,
                            predicted_decode_len=predicted_decode_len,
                            len_extend_rate=self._len_extend_rate)
+
+    def batch_route(self, tasks: List[Task], endpoints: List[Endpoint]) -> List[TaskRoute]:
+        task_workloads = np.empty((len(endpoints), len(tasks)), dtype=np.float64)
+        for task_i, task in enumerate(tasks):
+            num_prompt_tokens = task.num_prompt_tokens
+            predicted_decode_len = task.predicted_decode_len
+            if num_prompt_tokens <= 0:
+                raise ValueError("Invalid num_prompt_tokens")
+            if predicted_decode_len <= 0:
+                raise ValueError("Invalid predicted_decode_len")
+            workload = decode_atten_workload(num_prompt_tokens,
+                                             predicted_decode_len,
+                                             num_prompt_tokens)
+            task_workloads[:, task_i] = workload
+
+        assign = self._optimize_batch_route(task_workloads, endpoints)
+
+        routes = []
+        for task_i, task in enumerate(tasks):
+            endpoint_i = assign[task_i]
+            routes.append(
+                DecodeRoute(request_id=task.request_id,
+                            endpoint=endpoints[endpoint_i],
+                            workload=task_workloads[endpoint_i, task_i],
+                            num_prompt_tokens=task.num_prompt_tokens,
+                            predicted_decode_len=task.predicted_decode_len,
+                            len_extend_rate=self._len_extend_rate))
+        return routes
 
     @staticmethod
     def _find_best_endpoint(endpoints):

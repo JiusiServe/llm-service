@@ -23,3 +23,6 @@ class RoundRobinRouter(Router):
     def route(self, task: Task, endpoints: List[Endpoint]) -> TaskRoute:
         self._endpoint_index = (self._endpoint_index + 1) % len(endpoints)
         return self._create_nonworkload_route(task, endpoints[self._endpoint_index])
+
+    def batch_route(self, tasks: List[Task], endpoints: List[Endpoint]) -> List[TaskRoute]:
+        return [self.route(task, endpoints) for task in tasks]

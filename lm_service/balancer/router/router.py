@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the llm-service project
 
 from typing import List, Tuple
+import numpy as np
 
 from ..common import Stage
 from ..endpoint import Endpoint
@@ -19,6 +20,9 @@ class Router:
         raise NotImplementedError
 
     def route(self, task: Task, endpoints: List[Endpoint]) -> TaskRoute:
+        raise NotImplementedError
+
+    def batch_route(self, tasks: List[Task], endpoints: List[Endpoint]) -> List[TaskRoute]:
         raise NotImplementedError
 
     def on_registered(self, balancer: "Balancer"):
@@ -64,3 +68,10 @@ class Router:
         if min_queue_ep_i == -1:
             raise RuntimeError("Found no Endpoint")
         return min_queue_ep_i
+
+    def _optimize_batch_route(self, task_workloads, endpoints: List[Endpoint]):
+        queue_workloads = np.empty(len(endpoints), dtype=np.float64)
+        for endpoint_i, endpoint in enumerate(endpoints):
+            queue_workloads[endpoint_i] = endpoint.queue_workload()
+        assign, _ = self._balancer.batch_route_optimizer.optimize(task_workloads, queue_workloads)
+        return assign

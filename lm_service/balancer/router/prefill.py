@@ -4,6 +4,7 @@
 import math
 from dataclasses import dataclass
 from typing import Tuple, List, Set
+import numpy as np
 
 from ..common import Stage
 from ..endpoint import Endpoint
@@ -43,9 +44,34 @@ class PrefillRouter(Router):
         workloads = self._estimate_workloads(task, endpoints[idx], None, None)
         return self._create_route(task, endpoint, workloads)
 
+    def batch_route(self, tasks: List[Task], endpoints: List[Endpoint]) -> List[TaskRoute]:
+        cache_ids = set([ep.config.cache_instance_id for ep in endpoints])
+        workloads_cache = [[None for _ in range(len(tasks))] for _ in range(len(endpoints))]
+        task_workloads = np.empty((len(endpoints), len(tasks)), dtype=np.float64)
+        for task_i, task in enumerate(tasks):
+            hit_lens = self._query_cache_hit(task.prompt_tokens, cache_ids)
+            max_hit_len = max(hit_lens.values())
+            for endpoint_i, endpoint in enumerate(endpoints):
+                hit_len = hit_lens.get(endpoint.config.cache_instance_id, 0)
+                workloads = \
+                    self._estimate_workloads(task, endpoint, hit_len, max_hit_len)
+                task_workloads[endpoint_i, task_i] = workloads.task_workload
+                workloads_cache[endpoint_i][task_i] = workloads
+
+        assign = self._optimize_batch_route(task_workloads, endpoints)
+
+        routes = []
+        for task_i, task in enumerate(tasks):
+            endpoint_i = assign[task_i]
+            routes.append(
+                self._create_route(task,
+                                   endpoints[endpoint_i],
+                                   workloads_cache[endpoint_i][task_i]))
+        return routes
+
     def _query_cache_hit(self, prompt_tokens: List[int], cache_instance_ids: Set[str]):
         if self._balancer.kv_connector is None:
-            return {}
+            return dict([(cache_id, 0) for cache_id in cache_instance_ids])
         return self._balancer.kv_connector.query_hit_len(prompt_tokens, cache_instance_ids)
 
     def _find_best_endpoint(self, task, endpoints, hit_lens):
@@ -87,7 +113,7 @@ class PrefillRouter(Router):
         return picked_endpoint, picked_workloads
 
     def _estimate_workloads(self, task, endpoint, hit_len, max_hit_len):
-        if self._balancer.kv_connector is None or not self._balancer.kv_connector.is_p2p_enabled:
+        if self._balancer.kv_connector is None or not self._balancer.kv_connector.is_cache_shared:
             num_cached_tokens = hit_len
         else:
             num_cached_tokens = max(max_hit_len, 0)

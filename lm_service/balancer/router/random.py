@@ -23,3 +23,6 @@ class RandomRouter(Router):
     def route(self, task: Task, endpoints: List[Endpoint]) -> TaskRoute:
         endpoint_index = random.randint(0, len(endpoints) - 1)
         return self._create_nonworkload_route(task, endpoints[endpoint_index])
+
+    def batch_route(self, tasks: List[Task], endpoints: List[Endpoint]) -> List[TaskRoute]:
+        return [self.route(task, endpoints) for task in tasks]
