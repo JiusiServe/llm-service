@@ -31,6 +31,8 @@ from lm_service.protocol.protocol import (
     ResponseType,
     ServerType,
     WorkerRegisterRequest,
+    ProfileRequest,
+    ProfileResponse,
 )
 import lm_service.envs as lm_service_envs
 from lm_service.metastore_client.factory import (
@@ -123,6 +125,7 @@ class DisaggWorker:
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_metrics = msgspec.msgpack.Decoder(MetricsRequest)
+        self.decoder_profile = msgspec.msgpack.Decoder(ProfileRequest)
         self.encoder = msgspec.msgpack.Encoder()
         self.stopping = False  # whether the worker is stopping
         self.running_requests: set[asyncio.Task] = set()
@@ -246,28 +249,47 @@ class DisaggWorker:
         logger.info("Worker loop stopped.")
 
     async def _handle_request(self, req_type: bytes, req_data: bytes):
-        if req_type == RequestType.ENCODE:
-            gen_req = self.decoder_generate.decode(req_data)
-            gen_req.sampling_params.max_tokens = 1
-            await self._encode_handler(gen_req)
-        elif req_type == RequestType.PREFILL:
-            gen_req = self.decoder_generate.decode(req_data)
-            gen_req.sampling_params.max_tokens = 1
-            await self._prefill_handler(gen_req)
-        elif req_type == RequestType.GENERATION:
-            gen_req = self.decoder_generate.decode(req_data)
-            await self._generation_handler(gen_req)
-        elif req_type == RequestType.ABORT:
-            gen_req = self.decoder_abort.decode(req_data)
-            await self._abort_handler(gen_req)
-        elif req_type == RequestType.HEARTBEAT:
-            hb_req = self.decoder_heartbeat.decode(req_data)
-            await self._heartbeat_handler(hb_req)
-        elif req_type == RequestType.METRICS:
-            metrics_req = self.decoder_metrics.decode(req_data)
-            await self._metrics_handler(metrics_req)
+        decoder_map = {
+            RequestType.ENCODE: {
+                "decoder": self.decoder_generate,
+                "handler": self._encode_handler,
+            },
+            RequestType.PREFILL: {
+                "decoder": self.decoder_generate,
+                "handler": self._prefill_handler,
+            },
+            RequestType.GENERATION: {
+                "decoder": self.decoder_generate,
+                "handler": self._generation_handler,
+            },
+            RequestType.ABORT: {
+                "decoder": self.decoder_abort,
+                "handler": self._abort_handler,
+            },
+            RequestType.HEARTBEAT: {
+                "decoder": self.decoder_heartbeat,
+                "handler": self._heartbeat_handler,
+            },
+            RequestType.METRICS: {
+                "decoder": self.decoder_metrics,
+                "handler": self._metrics_handler,
+            },
+            RequestType.START_PROFILE: {
+                "decoder": self.decoder_profile,
+                "handler": self._start_profile_handler,
+            },
+            RequestType.STOP_PROFILE: {
+                "decoder": self.decoder_profile,
+                "handler": self._stop_profile_handler,
+            },
+        }
+        if req_type in decoder_map:
+            req = decoder_map[req_type]["decoder"].decode(req_data)
         else:
-            raise Exception(f"Unknown Request Type: {req_type.decode()}.")
+            raise Exception("Unknown Request Type.")
+        if req_type == RequestType.ENCODE or req_type == RequestType.PREFILL:
+            req.sampling_params.max_tokens = 1
+        await decoder_map[req_type]["handler"](req)
 
     async def _prefill_handler(self, req: GenerationRequest):
         task = asyncio.create_task(
@@ -414,6 +436,67 @@ class DisaggWorker:
         for socket in self.to_proxy.values():
             await socket.send_multipart(msg, copy=False)
         await self._exit_handler()
+
+    async def _start_profile(self, req: ProfileRequest):
+        """Start profiling on the engine."""
+        try:
+            await self.engine.start_profile()
+            msg = (
+                ResponseType.START_PROFILE,
+                self.encoder.encode(
+                    ProfileResponse(request_id=req.request_id, status="OK")
+                ),
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to start profiling for request %s", req.request_id
+            )
+            msg = (
+                ResponseType.FAILURE,
+                self.encoder.encode(
+                    FailureResponse(
+                        request_id=req.request_id,
+                        error_message=str(e) or type(e).__name__,
+                    )
+                ),
+            )
+        await self._handle_response(req, msg)
+
+    async def _start_profile_handler(self, req: ProfileRequest):
+        """Start profiling on the engine."""
+        task = asyncio.create_task(self._start_profile(req))
+        self.running_requests.add(task)
+        task.add_done_callback(self.running_requests.discard)
+
+    async def _stop_profile(self, req: ProfileRequest):
+        """Stop profiling on the engine."""
+        try:
+            await self.engine.stop_profile()
+            msg = (
+                ResponseType.STOP_PROFILE,
+                self.encoder.encode(
+                    ProfileResponse(request_id=req.request_id, status="OK")
+                ),
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to stop profiling for request %s", req.request_id
+            )
+            msg = (
+                ResponseType.FAILURE,
+                self.encoder.encode(
+                    FailureResponse(
+                        request_id=req.request_id,
+                        error_message=str(e) or type(e).__name__,
+                    )
+                ),
+            )
+        await self._handle_response(req, msg)
+
+    async def _stop_profile_handler(self, req: ProfileRequest):
+        task = asyncio.create_task(self._stop_profile(req))
+        self.running_requests.add(task)
+        task.add_done_callback(self.running_requests.discard)
 
     async def _generate(
         self,
