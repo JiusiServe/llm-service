@@ -28,6 +28,9 @@ PROXY_ADDR="${PROXY_ADDR:-/tmp/proxy}"
 LOG_PATH="${CURRENT_DIR}/logs"
 IMAGE_FILE_PATH=""
 
+# Reduce memory fragmentation
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 function start_encoder() {
     local dev_id=$1
     local address=$2

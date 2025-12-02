@@ -91,6 +91,11 @@ class Proxy(EngineClient):
         transfer_protocol: Optional[str] = None,
         metastore_client_config: Optional[dict] = None,
     ):
+        self._check_type("enable_health_monitor", enable_health_monitor, bool)
+        self._check_positive("health_check_interval", health_check_interval)
+        self._check_positive("health_threshold", health_threshold)
+        self._check_subclass("router", router, RoutingInterface)
+
         self.instance_clusters: dict[ServerType, InstanceCluster] = {}
         self.queues: dict[str, asyncio.Queue] = {}
         # This "Encoder" is used for handling message types, not for "Encode - Prefill - Decode"
@@ -816,6 +821,26 @@ class Proxy(EngineClient):
     ) -> None:
         cluster = self.instance_clusters[server_type]
         await cluster.service_discovery.remove_instance(addr)
+
+    def _check_type(self, name, value, expected_type):
+        if not isinstance(value, expected_type):
+            raise TypeError(
+                f"{name} must be {expected_type.__name__}, ",
+                f"got {type(value).__name__}",
+            )
+
+    def _check_positive(self, name, value):
+        try:
+            if value <= 0:
+                raise ValueError
+        except Exception:
+            raise ValueError(f"{name} must be a positive number")
+
+    def _check_subclass(self, name, value, base_class):
+        if not isinstance(value, type) or not issubclass(value, base_class):
+            raise TypeError(
+                f"{name} must be a subclass of {base_class.__name__}"
+            )
 
 
 def _has_mm_data(prompt: PromptType) -> bool:

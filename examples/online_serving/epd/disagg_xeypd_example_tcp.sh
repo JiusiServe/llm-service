@@ -55,6 +55,9 @@ IMAGE_FILE_PATH=""
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
+# Reduce memory fragmentation
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 function start_encoder() {
     local dev_id=$1
     local address=$2
