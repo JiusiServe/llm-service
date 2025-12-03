@@ -100,6 +100,8 @@ class InstanceCluster:
                     raise response
                 self._record_proxy_to_instance_time(addr, response, start_time)
                 finished = response.finish_reason is not None
+                # mark instance latest successful response time
+                self.service_discovery.update_latest_success(addr)
                 yield response
 
         finally:
@@ -129,6 +131,9 @@ class InstanceCluster:
             self._record_proxy_to_instance_time(addr, response, start_time)
             if isinstance(response, Exception):
                 raise response
+            else:
+                # mark instance latest successful response time
+                self.service_discovery.update_latest_success(addr)
         finally:
             self.stats_monitor.on_request_completed(
                 addr, request_id=request.request_id

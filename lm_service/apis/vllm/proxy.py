@@ -488,8 +488,9 @@ class Proxy(EngineClient):
         address = worker_register_req.address
         server_type = worker_register_req.server_type
 
-        if server_type in self.server_to_socket_map:
-            socket_dict = self.server_to_socket_map[server_type]
+        if server_type in self.instance_clusters:
+            cluster = self.instance_clusters[server_type]
+            socket_dict = cluster.sockets
             if address not in socket_dict:
                 try:
                     socket = self.ctx.socket(zmq.constants.PUSH)
@@ -499,7 +500,7 @@ class Proxy(EngineClient):
                         f"Failed to connect to worker {address} with error: {e}"
                     )
                     return
-                cluster_lock = self.instance_clusters[server_type].socket_lock
+                cluster_lock = cluster.socket_lock
                 async with cluster_lock:
                     socket_dict[address] = socket
                     logger.info(f"Connected to worker {address} success")
