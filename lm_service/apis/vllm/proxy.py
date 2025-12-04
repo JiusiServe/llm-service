@@ -764,6 +764,12 @@ class Proxy(EngineClient):
             else None
         )
 
+    def get_all_instance_status(self):
+        status = {}
+        for server_type, cluster in self.instance_clusters.items():
+            status[server_type.name] = cluster.get_instances_status()
+        return status
+
     async def start_profile(self) -> None:
         raise NotImplementedError
 
