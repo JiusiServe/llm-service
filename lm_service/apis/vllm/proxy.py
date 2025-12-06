@@ -35,6 +35,8 @@ from lm_service.protocol.protocol import (
     ResponseType,
     ServerType,
     WorkerRegisterRequest,
+    ProfileRequest,
+    ProfileResponse,
 )
 from lm_service.request_stats import RequestStatsMonitor
 from lm_service.routing_logic import (
@@ -175,7 +177,7 @@ class Proxy(EngineClient):
 
         # Using the is_pd_merged as the only key to determine which instance cluster to initialize
         init_params = locals()
-        active_types = (
+        self.active_types = (
             {ServerType.E_INSTANCE, ServerType.PD_INSTANCE}
             if self.is_pd_merged
             else {
@@ -184,7 +186,7 @@ class Proxy(EngineClient):
                 ServerType.D_INSTANCE,
             }
         )
-        for server_type in active_types:
+        for server_type in self.active_types:
             if not use_metastore:
                 addr_param_name = SERVER_PARAMS_MAP[server_type][
                     "addr_list_name"
@@ -483,9 +485,14 @@ class Proxy(EngineClient):
         address = worker_register_req.address
         server_type = worker_register_req.server_type
 
-        if server_type in self.server_to_socket_map:
-            socket_dict = self.server_to_socket_map[server_type]
-            if address not in socket_dict:
+        if server_type in self.active_types:
+            cluster = self.instance_clusters.get(server_type, None)
+            if cluster is None:
+                logger.error(
+                    f"_worker_register_handler fail, unknown server type {server_type}"
+                )
+                return
+            if address not in cluster.sockets:
                 try:
                     socket = self.ctx.socket(zmq.constants.PUSH)
                     socket.connect(address)
@@ -494,9 +501,9 @@ class Proxy(EngineClient):
                         f"Failed to connect to worker {address} with error: {e}"
                     )
                     return
-                cluster_lock = self.instance_clusters[server_type].socket_lock
+                cluster_lock = cluster.socket_lock
                 async with cluster_lock:
-                    socket_dict[address] = socket
+                    cluster.sockets[address] = socket
                     logger.info(f"Connected to worker {address} success")
         else:
             logger.error(
@@ -518,6 +525,7 @@ class Proxy(EngineClient):
         heartbeat_decoder = msgspec.msgpack.Decoder(HeartbeatResponse)
         metrics_decoder = msgspec.msgpack.Decoder(MetricsResponse)
         exit_decoder = msgspec.msgpack.Decoder(ExitRequest)
+        profile_decoder = msgspec.msgpack.Decoder(ProfileResponse)
         worker_register_decoder = msgspec.msgpack.Decoder(WorkerRegisterRequest)
 
         try:
@@ -548,6 +556,7 @@ class Proxy(EngineClient):
                     MetricsResponse,
                     ExitRequest,
                     WorkerRegisterRequest,
+                    ProfileResponse,
                 ]
                 # TODO: maybe we can have a mapping from resp_type to prefill
                 if resp_type in (
@@ -568,6 +577,11 @@ class Proxy(EngineClient):
                 elif resp_type == RequestType.REGISTER:
                     resp = worker_register_decoder.decode(payload)
                     asyncio.create_task(self._worker_register_handler(resp))
+                elif (
+                    resp_type == ResponseType.START_PROFILE
+                    or resp_type == ResponseType.STOP_PROFILE
+                ):
+                    resp = profile_decoder.decode(payload)
                 else:
                     raise RuntimeError(
                         f"Unknown response type from worker: {resp_type.decode()}"
@@ -759,11 +773,78 @@ class Proxy(EngineClient):
             else None
         )
 
-    async def start_profile(self) -> None:
-        raise NotImplementedError
+    def create_handle_register_task(self, resp: WorkerRegisterRequest) -> None:
+        task = asyncio.create_task(self._worker_register_handler(resp))
+        task.add_done_callback(
+            lambda t: logger.error(
+                "Exception in _worker_register_handler: %s",
+                t.exception(),
+            )
+            if t.exception() is not None and not t.cancelled()
+            else None
+        )
 
-    async def stop_profile(self) -> None:
-        raise NotImplementedError
+    async def start_profile(self, server_type: ServerType, addr: str) -> None:
+        # lazy initialization
+        if self.output_handler is None:
+            self.output_handler = asyncio.create_task(
+                self._run_output_handler()
+            )
+        request_id = str(uuid.uuid4())
+        request = ProfileRequest(
+            request_id=request_id, proxy_addr=self.proxy_addr
+        )
+        q: asyncio.Queue = asyncio.Queue()
+        self.queues[request_id] = q
+
+        try:
+            payload = self.encoder.encode(request)
+            msg = (RequestType.START_PROFILE, payload)
+            socket = await self._get_socket_and_server_types_from_addr(
+                addr, server_type
+            )
+            await socket.send_multipart(msg, copy=False)
+            response = await q.get()
+            if (
+                isinstance(response, ProfileResponse)
+                and response.status == "OK"
+            ):
+                logger.info("Profiling started successfully")
+            else:
+                logger.error(f"Failed to start profiling: {response}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to start profiling: {e}") from e
+        finally:
+            self.queues.pop(request_id, None)
+
+    async def stop_profile(self, server_type: ServerType, addr: str) -> None:
+        request_id = str(uuid.uuid4())
+        request = ProfileRequest(
+            request_id=request_id, proxy_addr=self.proxy_addr
+        )
+        q: asyncio.Queue = asyncio.Queue()
+        self.queues[request_id] = q
+
+        try:
+            payload = self.encoder.encode(request)
+            msg = (RequestType.STOP_PROFILE, payload)
+
+            socket = await self._get_socket_and_server_types_from_addr(
+                addr, server_type
+            )
+            await socket.send_multipart(msg, copy=False)
+            response = await q.get()
+            if (
+                isinstance(response, ProfileResponse)
+                and response.status == "OK"
+            ):
+                logger.info("Profiling stopped successfully")
+            else:
+                logger.error(f"Failed to stop profiling: {response}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to stop profiling: {e}") from e
+        finally:
+            self.queues.pop(request_id, None)
 
     async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         raise NotImplementedError
