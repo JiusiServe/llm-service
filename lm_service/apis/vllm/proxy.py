@@ -435,6 +435,12 @@ class Proxy(EngineClient):
 
         except msgspec.ValidationError as e:
             raise RuntimeError(f"Invalid Parameters: {e}.") from e
+        except RuntimeError as e:
+            logger.error(f"Runtime error during generate: {e}")
+        except Exception as e:
+            # Log any unexpected exception but do not re-raise to ensure
+            # request cleanup in finally block.
+            logger.error("Unexpected error during generate: %s", e)
         finally:
             self.queues.pop(request_id, None)
 
