@@ -31,6 +31,8 @@ class RequestType:
     PREFILL = b"\x05"
     REGISTER = b"\x06"
     EXIT = b"\x07"
+    START_PROFILE = b"\x08"
+    STOP_PROFILE = b"\x09"
 
 
 class PDAbortRequest(msgspec.Struct):
@@ -45,6 +47,9 @@ class ResponseType:
     METRICS = b"\x04"
     PREFILL = b"\x05"
     REGISTER = b"\x06"
+    EXIT = b"\x07"
+    START_PROFILE = b"\x08"
+    STOP_PROFILE = b"\x09"
 
 
 class GenerationResponse(msgspec.Struct):
@@ -120,3 +125,13 @@ class WorkerRegisterRequest(msgspec.Struct):
     request_id: str
     server_type: ServerType
     address: str
+
+
+class ProfileRequest(msgspec.Struct):
+    request_id: str
+    proxy_addr: str
+
+
+class ProfileResponse(msgspec.Struct):
+    request_id: str
+    status: str = "OK"

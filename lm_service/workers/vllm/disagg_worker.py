@@ -31,6 +31,8 @@ from lm_service.protocol.protocol import (
     ResponseType,
     ServerType,
     WorkerRegisterRequest,
+    ProfileRequest,
+    ProfileResponse,
 )
 import lm_service.envs as lm_service_envs
 from lm_service.metastore_client.factory import (
@@ -124,6 +126,7 @@ class DisaggWorker:
         self.decoder_heartbeat = msgspec.msgpack.Decoder(HeartbeatRequest)
         self.decoder_abort = msgspec.msgpack.Decoder(GenerationRequest)
         self.decoder_metrics = msgspec.msgpack.Decoder(MetricsRequest)
+        self.decoder_profile = msgspec.msgpack.Decoder(ProfileRequest)
         self.encoder = msgspec.msgpack.Encoder()
         self.stopping = False  # whether the worker is stopping
         self.running_requests: set[asyncio.Task] = set()
@@ -267,6 +270,12 @@ class DisaggWorker:
         elif req_type == RequestType.METRICS:
             metrics_req = self.decoder_metrics.decode(req_data)
             await self._metrics_handler(metrics_req)
+        elif req_type == RequestType.START_PROFILE:
+            reg_req = self.decoder_profile.decode(req_data)
+            await self._start_profile_handler(reg_req)
+        elif req_type == RequestType.STOP_PROFILE:
+            reg_req = self.decoder_profile.decode(req_data)
+            await self._stop_profile_handler(reg_req)
         else:
             raise Exception(f"Unknown Request Type: {req_type.decode()}.")
 
@@ -415,6 +424,67 @@ class DisaggWorker:
         for socket in self.to_proxy.values():
             await socket.send_multipart(msg, copy=False)
         await self._exit_handler()
+
+    async def _start_profile(self, req: ProfileRequest):
+        """Start profiling on the engine."""
+        try:
+            await self.engine.start_profile()
+            msg = (
+                ResponseType.START_PROFILE,
+                self.encoder.encode(
+                    ProfileResponse(request_id=req.request_id, status="OK")
+                ),
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to start profiling for request %s", req.request_id
+            )
+            msg = (
+                ResponseType.FAILURE,
+                self.encoder.encode(
+                    FailureResponse(
+                        request_id=req.request_id,
+                        error_message=str(e) or type(e).__name__,
+                    )
+                ),
+            )
+        await self._handle_response(req, msg)
+
+    async def _start_profile_handler(self, req: ProfileRequest):
+        """Start profiling on the engine."""
+        task = asyncio.create_task(self._start_profile(req))
+        self.running_requests.add(task)
+        task.add_done_callback(self.running_requests.discard)
+
+    async def _stop_profile(self, req: ProfileRequest):
+        """Stop profiling on the engine."""
+        try:
+            await self.engine.stop_profile()
+            msg = (
+                ResponseType.STOP_PROFILE,
+                self.encoder.encode(
+                    ProfileResponse(request_id=req.request_id, status="OK")
+                ),
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to stop profiling for request %s", req.request_id
+            )
+            msg = (
+                ResponseType.FAILURE,
+                self.encoder.encode(
+                    FailureResponse(
+                        request_id=req.request_id,
+                        error_message=str(e) or type(e).__name__,
+                    )
+                ),
+            )
+        await self._handle_response(req, msg)
+
+    async def _stop_profile_handler(self, req: ProfileRequest):
+        task = asyncio.create_task(self._stop_profile(req))
+        self.running_requests.add(task)
+        task.add_done_callback(self.running_requests.discard)
 
     async def _generate(
         self,
