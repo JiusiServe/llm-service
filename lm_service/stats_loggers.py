@@ -33,6 +33,7 @@ class DisaggWorkerStatsLogger(StatLoggerBase):
             "prefill_time_requests",
             "mean_time_per_output_token_requests",
             "time_to_first_token",
+            "ec_load_time_ms",
         ]
         self.finished_request_attr = [
             "e2e_latency",
@@ -101,6 +102,8 @@ class DisaggWorkerStatsLogger(StatLoggerBase):
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
             self._observe(iteration_stats)
+        if scheduler_stats:
+            self._observe_scheduler_stats(scheduler_stats)
 
     def log(self):
         now = time.monotonic()
@@ -206,6 +209,23 @@ class DisaggWorkerStatsLogger(StatLoggerBase):
             self.stats_dict["time_to_first_token"]["overall"][0] += 1
             self.stats_dict["time_to_first_token"]["overall"][1] += ttft
 
+    def _observe_scheduler_stats(self, scheduler_stats: SchedulerStats):
+        if scheduler_stats.ec_connector_stats is None:
+            return
+
+        self.stats_dict["ec_load_time_ms"]["latest"][0] += (
+            scheduler_stats.ec_connector_stats["num_loads"]
+        )
+        self.stats_dict["ec_load_time_ms"]["latest"][1] += (
+            scheduler_stats.ec_connector_stats["load_time_ms"]
+        )
+        self.stats_dict["ec_load_time_ms"]["overall"][0] += (
+            scheduler_stats.ec_connector_stats["num_loads"]
+        )
+        self.stats_dict["ec_load_time_ms"]["overall"][1] += (
+            scheduler_stats.ec_connector_stats["load_time_ms"]
+        )
+
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.info(
@@ -289,6 +309,7 @@ class MetricsReporter:
             "Avg mean time per output token requests: %.3f ms, "
             "Avg time to first token: %.3f ms, "
             "Avg proxy ttft: %.3f ms, "
+            "Avg EC Load Time: %.3f ms"
         )
         log_msg += "Avg proxy to instance requests time: %.3f ms, "
         msg = ""
@@ -309,6 +330,7 @@ class MetricsReporter:
                         if self.has_d_instance()
                         else 0.0,
                         value.get("proxy_to_instance_time_avg", 0.0),
+                        value.get("ec_load_time_ms", 0.0),
                     )
 
                 metrics[work_addr] = msg
