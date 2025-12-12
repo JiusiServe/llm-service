@@ -9,9 +9,6 @@ from abc import ABC, abstractmethod
 import zmq
 import zmq.asyncio
 
-import zmq
-import zmq.asyncio
-
 from lm_service.protocol.protocol import ServerType
 from lm_service.logger_utils import init_logger
 
