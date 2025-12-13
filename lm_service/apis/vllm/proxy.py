@@ -91,6 +91,7 @@ class Proxy(EngineClient):
         transfer_protocol: Optional[str] = None,
         metastore_client_config: Optional[dict] = None,
     ):
+        # Validate input parameters for some components
         self._check_type("enable_health_monitor", enable_health_monitor, bool)
         self._check_positive("health_check_interval", health_check_interval)
         self._check_positive("health_threshold", health_threshold)
@@ -104,10 +105,6 @@ class Proxy(EngineClient):
             lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.ctx = zmq.asyncio.Context()
-        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_p_sockets: dict[str, zmq.asyncio.Socket] = {}
-        self.to_d_sockets: dict[str, zmq.asyncio.Socket] = {}
 
         self.enable_health_monitor = enable_health_monitor
         self.health_check_interval = health_check_interval
@@ -128,88 +125,28 @@ class Proxy(EngineClient):
             seed=42,
         )
 
-        use_metastore = (
+        # Logically, there is no essential difference between PD instances and D instances in handling tokens.
+        # Therefore, in internal processing, we treat them as equivalent to simplify the logic.
+
+        if (
             metastore_client_config is not None
             or lm_service_envs.LM_SERVICE_METASTORE_CLIENT is not None
-        )
-
-        self.server_to_socket_map = {
-            ServerType.E_INSTANCE: self.to_encode_sockets,
-            ServerType.PD_INSTANCE: self.to_pd_sockets,
-            ServerType.P_INSTANCE: self.to_p_sockets,
-            ServerType.D_INSTANCE: self.to_d_sockets,
-        }
-
-        if use_metastore:
-            config: MetastoreClientConfig = json_to_metastore_config(
-                metastore_client_config
+        ):
+            self._init_cluster_with_metastore(
+                metastore_client_config, proxy_addr
             )
-            if proxy_addr is None:
-                local_ip = lm_service_envs.LM_SERVICE_HOST_IP or get_ip()
-                proxy_port = (
-                    int(lm_service_envs.LM_SERVICE_RPC_PORT)
-                    if lm_service_envs.LM_SERVICE_RPC_PORT
-                    else get_open_port()
-                )
-                proxy_addr = f"{local_ip}:{proxy_port}"
-
-            self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
-            if is_addr_ipv6(proxy_addr) and self.transfer_protocol == "tcp":
-                self.ctx.setsockopt(zmq.constants.IPV6, 1)
-            self.metastore_client = (
-                MetastoreClientFactory.create_metastore_client(
-                    config=config,
-                    node_info=self.proxy_addr,
-                    server_type=ServerType.PROXY.value,
-                    to_encode_sockets=self.to_encode_sockets,
-                    to_pd_sockets=self.to_pd_sockets,
-                    to_p_sockets=self.to_p_sockets,
-                    to_d_sockets=self.to_d_sockets,
-                )
-            )
-            self.is_pd_merged = self.metastore_client.is_pd_merge
         else:
-            self._validate_input_addr_and_judge_pd_merged(
-                proxy_addr=proxy_addr,
-                encode_addr_list=encode_addr_list,
-                pd_addr_list=pd_addr_list,
-                p_addr_list=p_addr_list,
-                d_addr_list=d_addr_list,
+            self._init_cluster_with_addr_list(
+                proxy_addr,
+                encode_addr_list,
+                p_addr_list,
+                d_addr_list or pd_addr_list,
             )
-            self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
-            if is_addr_ipv6(proxy_addr) and self.transfer_protocol == "tcp":
-                self.ctx.setsockopt(zmq.constants.IPV6, 1)
 
-        # Using the is_pd_merged as the only key to determine which instance cluster to initialize
-        init_params = locals()
-        active_types = (
-            {ServerType.E_INSTANCE, ServerType.PD_INSTANCE}
-            if self.is_pd_merged
-            else {
-                ServerType.E_INSTANCE,
-                ServerType.P_INSTANCE,
-                ServerType.D_INSTANCE,
-            }
-        )
-        for server_type in active_types:
-            if not use_metastore:
-                addr_param_name = SERVER_PARAMS_MAP[server_type][
-                    "addr_list_name"
-                ]
-                addr_list = [
-                    f"{self.transfer_protocol}://{addr}"
-                    for addr in init_params[str(addr_param_name)]
-                ]
-                sockets = self.connect_to_socket(addr_list)
-            else:
-                sockets = self.server_to_socket_map[server_type]
-            self._initialize_instance_clusters(server_type, sockets)
-
-    def _validate_input_addr_and_judge_pd_merged(
+    def _init_cluster_with_addr_list(
         self,
         proxy_addr,
         encode_addr_list,
-        pd_addr_list,
         p_addr_list,
         d_addr_list,
     ):
@@ -219,20 +156,67 @@ class Proxy(EngineClient):
         if not encode_addr_list:
             raise ValueError("encode_addr_list must be provided")
 
-        self.is_pd_merged = pd_addr_list is not None and len(pd_addr_list) > 0
+        if not d_addr_list:
+            raise ValueError("d_addr_list or pd_addr_list must be provided")
 
-        if self.is_pd_merged:
-            if p_addr_list or d_addr_list:
-                raise ValueError(
-                    "If pd_addr_list is provided, "
-                    "p_addr_list and d_addr_list must not be provided"
-                )
-        else:
-            if not p_addr_list or not d_addr_list:
-                raise ValueError(
-                    "If pd_addr_list is not provided, "
-                    "both p_addr_list and d_addr_list must be provided"
-                )
+        self.is_pd_merged = not bool(p_addr_list)
+        self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
+        if is_addr_ipv6(proxy_addr) and self.transfer_protocol == "tcp":
+            self.ctx.setsockopt(zmq.constants.IPV6, 1)
+        init_params = locals()
+
+        for server_type in SERVER_PARAMS_MAP:
+            if self.is_pd_merged and server_type == ServerType.D_INSTANCE:
+                continue
+            addr_param_name = str(
+                SERVER_PARAMS_MAP[server_type]["addr_list_name"]
+            )
+            addr_list = [
+                f"{self.transfer_protocol}://{addr}"
+                for addr in (init_params.get(addr_param_name) or [])
+            ]
+            if addr_list:
+                sockets = self.connect_to_socket(addr_list)
+                self._initialize_instance_clusters(server_type, sockets)
+
+    def _init_cluster_with_metastore(self, metastore_client_config, proxy_addr):
+        config: MetastoreClientConfig = json_to_metastore_config(
+            metastore_client_config
+        )
+        if proxy_addr is None:
+            local_ip = lm_service_envs.LM_SERVICE_HOST_IP or get_ip()
+            proxy_port = (
+                int(lm_service_envs.LM_SERVICE_RPC_PORT)
+                if lm_service_envs.LM_SERVICE_RPC_PORT
+                else get_open_port()
+            )
+            proxy_addr = f"{local_ip}:{proxy_port}"
+
+        self.proxy_addr = f"{self.transfer_protocol}://{proxy_addr}"
+        if is_addr_ipv6(proxy_addr) and self.transfer_protocol == "tcp":
+            self.ctx.setsockopt(zmq.constants.IPV6, 1)
+
+        to_e_sockets: dict[str, zmq.asyncio.Socket] = {}
+        to_p_sockets: dict[str, zmq.asyncio.Socket] = {}
+        to_d_sockets: dict[str, zmq.asyncio.Socket] = {}
+
+        self.metastore_client = MetastoreClientFactory.create_metastore_client(
+            config=config,
+            node_info=self.proxy_addr,
+            server_type=ServerType.PROXY.value,
+            to_e_sockets=to_e_sockets,
+            to_p_sockets=to_p_sockets,
+            to_d_sockets=to_d_sockets,
+        )
+        self.is_pd_merged = self.metastore_client.is_pd_merged
+        init_params = locals()
+        for server_type in SERVER_PARAMS_MAP:
+            if self.is_pd_merged and server_type == ServerType.P_INSTANCE:
+                continue
+            sockets = init_params[
+                SERVER_PARAMS_MAP[server_type]["socket_list_name"]
+            ]
+            self._initialize_instance_clusters(server_type, sockets)
 
     def _initialize_instance_clusters(
         self,
@@ -399,40 +383,33 @@ class Proxy(EngineClient):
             req_dict = msgspec.to_builtins(request)
             request = msgspec.convert(req_dict, GenerationRequest, strict=True)
 
+            # Step 1 : Encode the multimodal data if any
             if _has_mm_data(prompt):
                 request.multi_modal_data = _encode_mm_data(
                     prompt["multi_modal_data"]
                 )
                 await self._process_request(ServerType.E_INSTANCE, request, q)
 
-            if self.is_pd_merged:
-                pd_cluster = self.instance_clusters[ServerType.PD_INSTANCE]
-                async for (
-                    pd_response
-                ) in self._process_request_streaming_response(
-                    ServerType.PD_INSTANCE, request, q
-                ):
-                    yield self._to_request_output(pd_response)
-                    ttft_recorded_flag = pd_cluster.cal_proxy_ttft(
-                        ttft_recorded_flag,
-                        proxy_ttft_start,
-                        pd_response,
-                    )
-            else:
+            # Step 2 : Maybe Prefill
+            if not self.is_pd_merged:
                 await self._process_request(ServerType.P_INSTANCE, request, q)
-                d_cluster = self.instance_clusters[ServerType.D_INSTANCE]
-                async for (
-                    d_response
-                ) in self._process_request_streaming_response(
-                    ServerType.D_INSTANCE, request, q
-                ):
-                    yield self._to_request_output(d_response)
-                    ttft_recorded_flag = d_cluster.cal_proxy_ttft(
-                        ttft_recorded_flag,
-                        proxy_ttft_start,
-                        d_response,
-                    )
 
+            # Step 3 : Decode
+            decode_server_type = (
+                ServerType.PD_INSTANCE
+                if self.is_pd_merged
+                else ServerType.D_INSTANCE
+            )
+            decode_cluster = self.instance_clusters[decode_server_type]
+            async for d_response in self._process_request_streaming_response(
+                decode_server_type, request, q
+            ):
+                yield self._to_request_output(d_response)
+                ttft_recorded_flag = decode_cluster.cal_proxy_ttft(
+                    ttft_recorded_flag,
+                    proxy_ttft_start,
+                    d_response,
+                )
         except msgspec.ValidationError as e:
             raise RuntimeError(f"Invalid Parameters: {e}.") from e
         except RuntimeError as e:
@@ -713,10 +690,10 @@ class Proxy(EngineClient):
                 proxy2instance_avg: float = (
                     cluster.get_avg_proxy_to_instance_time(addr)
                 )
-                if server_type in [
-                    ServerType.PD_INSTANCE,
+                if server_type in (
                     ServerType.D_INSTANCE,
-                ]:
+                    ServerType.PD_INSTANCE,
+                ):
                     proxy_ttft_avg = cluster.get_avg_proxy_ttft()
                 for engine_id in response.metrics:
                     response.metrics[engine_id].update(

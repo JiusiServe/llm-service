@@ -34,8 +34,7 @@ class RedisMetastoreClient(MetastoreClientBase):
         node_info: str = "",
         server_type: Optional[int] = None,
         to_proxy: Optional[dict[str, zmq.asyncio.Socket]] = None,
-        to_encode_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
-        to_pd_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
+        to_e_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
         to_p_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
         to_d_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
     ):
@@ -49,10 +48,9 @@ class RedisMetastoreClient(MetastoreClientBase):
             node_info: Node information string identifier
             server_type: Type of the engine instance
             to_proxy: Dictionary of ZMQ sockets for proxy communication
-            to_encode_sockets: Dictionary of ZMQ sockets for encoding service communication
-            to_pd_sockets: Dictionary of ZMQ sockets for parameter distribution service
-            to_p_sockets: Dictionary of ZMQ sockets for parameter service
-            to_d_sockets: Dictionary of ZMQ sockets for data service
+            to_e_sockets: Dictionary of ZMQ sockets for encoding service communication
+            to_p_sockets: Dictionary of ZMQ sockets for prefill service communication
+            to_d_sockets: Dictionary of ZMQ sockets for decoding service communication
         """
 
         super().__init__(
@@ -60,8 +58,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             node_info,
             server_type,
             to_proxy,
-            to_encode_sockets,
-            to_pd_sockets,
+            to_e_sockets,
             to_p_sockets,
             to_d_sockets,
         )
@@ -99,7 +96,7 @@ class RedisMetastoreClient(MetastoreClientBase):
         if self.server_type != ServerType.PROXY.value:
             self.launch_worker_task()
         else:
-            self.is_pd_merged = self._get_deploy_form()
+            self._is_pd_merged = self._get_deploy_form()
             logger.info(f"Deploy form is E-PD: {self.is_pd_merged}")
 
     def _initialize_clients(self):
@@ -155,7 +152,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             )
         )
 
-        if self.is_pd_merged:
+        if self._is_pd_merged:
             self.async_task.append(
                 asyncio.create_task(
                     self.async_update_socket(
@@ -180,8 +177,8 @@ class RedisMetastoreClient(MetastoreClientBase):
             )
 
     @property
-    def is_pd_merge(self):
-        return self.is_pd_merged
+    def is_pd_merged(self):
+        return self._is_pd_merged
 
     def _get_deploy_form(self) -> bool:
         """
@@ -201,20 +198,26 @@ class RedisMetastoreClient(MetastoreClientBase):
             d_node_key = f"{lm_service_envs.LM_SERVICE_REDIS_KEY_PREFIX}_{ServerType.D_INSTANCE.value}"
             for _ in range(retry_times):
                 deploy_form = self.get_metadata(self.server_key)
-                if e_node_key in deploy_form and pd_node_key in deploy_form:
+
+                has_e = e_node_key in deploy_form
+                has_p = p_node_key in deploy_form
+                has_d = d_node_key in deploy_form
+                has_pd = pd_node_key in deploy_form
+
+                if has_e and has_pd:
+                    # E + PD
                     self.update_socket(ServerType.E_INSTANCE.value)
                     self.update_socket(ServerType.PD_INSTANCE.value)
                     return True
-                elif (
-                    e_node_key in deploy_form
-                    and p_node_key in deploy_form
-                    and d_node_key in deploy_form
-                ):
+
+                if has_e and has_p and has_d:
                     self.update_socket(ServerType.E_INSTANCE.value)
                     self.update_socket(ServerType.P_INSTANCE.value)
                     self.update_socket(ServerType.D_INSTANCE.value)
                     return False
+
                 time.sleep(1)
+
             logger.warning(
                 f"Waiting for {pd_node_key}, {p_node_key}, {d_node_key} timeout, "
                 f"Use the default PD merge deployment mode"
@@ -492,12 +495,12 @@ class RedisMetastoreClient(MetastoreClientBase):
             if server_type == ServerType.PROXY.value:
                 self.connect_to_server(servers_dict, self.to_proxy)
             elif server_type == ServerType.E_INSTANCE.value:
-                self.connect_to_server(servers_dict, self.to_encode_sockets)
-            elif server_type == ServerType.PD_INSTANCE.value:
-                self.connect_to_server(servers_dict, self.to_pd_sockets)
+                self.connect_to_server(servers_dict, self.to_e_sockets)
             elif server_type == ServerType.P_INSTANCE.value:
                 self.connect_to_server(servers_dict, self.to_p_sockets)
             elif server_type == ServerType.D_INSTANCE.value:
+                self.connect_to_server(servers_dict, self.to_d_sockets)
+            elif server_type == ServerType.PD_INSTANCE.value:
                 self.connect_to_server(servers_dict, self.to_d_sockets)
 
     async def async_update_proxy_sockets(self):
@@ -529,8 +532,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             logger.info("Socket update task cancelled")
             # Close all sockets on cancellation
             for socket in (
-                list(self.to_encode_sockets.values())
-                + list(self.to_pd_sockets.values())
+                list(self.to_e_sockets.values())
                 + list(self.to_p_sockets.values())
                 + list(self.to_d_sockets.values())
                 + list(self.to_proxy.values())

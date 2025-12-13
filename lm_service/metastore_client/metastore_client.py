@@ -19,8 +19,7 @@ class MetastoreClientBase(ABC):
         node_info: str = "",
         server_type: Optional[int] = None,
         to_proxy: Optional[dict[str, zmq.asyncio.Socket]] = None,
-        to_encode_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
-        to_pd_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
+        to_e_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
         to_p_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
         to_d_sockets: Optional[dict[str, zmq.asyncio.Socket]] = None,
         *args,
@@ -29,20 +28,17 @@ class MetastoreClientBase(ABC):
         self.metastore_client_config = metastore_client_config
         self.node_info = node_info
         self.server_type = server_type
-        self.to_encode_sockets: dict[str, zmq.asyncio.Socket] = (
-            to_encode_sockets if to_encode_sockets is not None else {}
-        )
-        self.to_pd_sockets: dict[str, zmq.asyncio.Socket] = (
-            to_pd_sockets if to_pd_sockets is not None else {}
-        )
-        self.to_proxy: dict[str, zmq.asyncio.Socket] = (
-            to_proxy if to_proxy is not None else {}
+        self.to_e_sockets: dict[str, zmq.asyncio.Socket] = (
+            to_e_sockets if to_e_sockets is not None else {}
         )
         self.to_p_sockets: dict[str, zmq.asyncio.Socket] = (
             to_p_sockets if to_p_sockets is not None else {}
         )
         self.to_d_sockets: dict[str, zmq.asyncio.Socket] = (
             to_d_sockets if to_d_sockets is not None else {}
+        )
+        self.to_proxy: dict[str, zmq.asyncio.Socket] = (
+            to_proxy if to_proxy is not None else {}
         )
 
     def launch_proxy_task(self):
