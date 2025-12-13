@@ -180,7 +180,7 @@ class RedisMetastoreClient(MetastoreClientBase):
             )
 
     @property
-    def is_pd_merge(self):
+    def is_pd_merged(self):
         return self.is_pd_merged
 
     def _get_deploy_form(self) -> bool:
