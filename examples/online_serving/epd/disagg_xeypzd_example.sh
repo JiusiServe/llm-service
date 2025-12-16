@@ -84,26 +84,20 @@ function start_prefill() {
             }
         }' \
         --kv-transfer-config '{
-            "kv_connector": "MooncakeConnectorV1",
-            "kv_buffer_device": "npu",
+            "kv_connector": "MooncakeConnectorStoreV1",
             "kv_role": "kv_producer",
-            "kv_parallel_size": 1,
-            "kv_port": "20001",
-            "engine_id": "0",
-            "kv_rank": 0,
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+            "mooncake_rpc_port": "50053",
             "kv_connector_extra_config": {
-                "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                },
-                "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                }
+                "local_hostname": "localhost",
+                "metadata_server": "http://localhost:8083/metadata",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "localhost:50053",
+                "global_segment_size": 30000000000
             }
         }' \
         >"$log_file" 2>&1 &
+    
     echo $! >> "$PID_FILE"
 }
 
@@ -121,23 +115,16 @@ function start_decoder() {
         --max-num-seqs $MAX_NUM_SEQS_DECODER \
         --enforce-eager \
         --kv-transfer-config '{
-            "kv_connector": "MooncakeConnectorV1",
-            "kv_buffer_device": "npu",
+            "kv_connector": "MooncakeConnectorStoreV1",
             "kv_role": "kv_consumer",
-            "kv_parallel_size": 1,
-            "kv_port": "20002",
-            "engine_id": "0",
-            "kv_rank": 0,
-            "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+            "mooncake_rpc_port": "50053",
             "kv_connector_extra_config": {
-                "prefill": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                },
-                "decode": {
-                    "dp_size": 1,
-                    "tp_size": 1
-                }
+                "local_hostname": "localhost",
+                "metadata_server": "http://localhost:8083/metadata",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "localhost:50053",
+                "global_segment_size": 30000000000
             }
         }' \
         >"$log_file" 2>&1 &
