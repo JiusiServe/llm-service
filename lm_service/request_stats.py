@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
+from typing import Union
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -20,7 +21,9 @@ class RequestStatsMonitor:
     Monitors and records request statistics for all instances.
     """
 
-    def __init__(self, instances: dict[str, zmq.asyncio.Socket]):
+    def __init__(
+        self, instances: Union[dict[str, zmq.asyncio.Socket], list[str]]
+    ):
         # Key: instance addr
         self.request_stats: dict[str, RequestStats] = defaultdict(
             lambda: RequestStats(in_flight_requests=set())

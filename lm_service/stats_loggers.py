@@ -216,15 +216,13 @@ class DisaggWorkerStatsLogger(StatLoggerBase):
             )
 
 
-class MetricsReporter:
+class BaseMetricsReporter:
     def __init__(
         self,
         server_type: ServerType,
-        instances: dict[str, zmq.asyncio.Socket],
         get_metrics_func,
     ):
         self.server_type = server_type
-        self._instances = instances
         self._get_metrics_func = get_metrics_func
         self.proxy_to_instance_time_count: defaultdict[str, int] = defaultdict(
             int
@@ -255,6 +253,12 @@ class MetricsReporter:
         self.proxy_to_instance_time_count[work_addr] += 1
         self.proxy_to_instance_time_total[work_addr] += time
 
+    def has_d_instance(self) -> bool:
+        return (
+            self.server_type == ServerType.D_INSTANCE
+            or self.server_type == ServerType.PD_INSTANCE
+        )
+
     def cal_proxy_ttft(
         self, ttft_recorded_flag: bool, start: float, resp
     ) -> bool:
@@ -276,6 +280,20 @@ class MetricsReporter:
             if "failed" in msg:
                 logger.error(msg)
             logger.info(msg)
+
+    async def build_metrics_msg(self) -> dict[str, str]:
+        raise NotImplementedError
+
+
+class MetricsReporter(BaseMetricsReporter):
+    def __init__(
+        self,
+        server_type: ServerType,
+        instances: dict[str, zmq.asyncio.Socket],
+        get_metrics_func,
+    ):
+        super().__init__(server_type, get_metrics_func)
+        self._instances = instances
 
     async def build_metrics_msg(self) -> dict[str, str]:
         # work_addr -> msg
@@ -331,8 +349,88 @@ class MetricsReporter:
                 metrics[work_addr] = error_msg
         return metrics
 
-    def has_d_instance(self) -> bool:
-        return (
-            self.server_type == ServerType.D_INSTANCE
-            or self.server_type == ServerType.PD_INSTANCE
+
+class HTTPMetricsReporter(BaseMetricsReporter):
+    def __init__(
+        self,
+        server_type: ServerType,
+        urls: list[str],
+        get_metrics_func,
+    ):
+        super().__init__(server_type, get_metrics_func)
+        self._urls = urls
+
+    async def build_metrics_msg(self) -> dict[str, str]:
+        # work_addr -> msg
+        metrics: dict[str, str] = {}
+        tasks = [
+            asyncio.create_task(
+                asyncio.wait_for(
+                    self._get_metrics_func(self.server_type, url),
+                    timeout=1.0,
+                )
+            )
+            for url in self._urls
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        log_msg = (
+            "ec_role: %s, "
+            "addr: %s, "
+            "Avg e2e time requests: %.3f ms, "
+            "Avg queue time requests: %.3f ms, "
+            "Avg prefill time requests: %.3f ms, "
+            "Avg mean time per output token requests: %.3f ms, "
+            "Avg time to first token: %.3f ms, "
+            "Avg proxy ttft: %.3f ms, "
+            "Avg proxy to instance requests time: %.3f ms "
         )
+        msg: str = ""
+        for url, result in zip(self._urls, results):
+            if isinstance(result, dict):
+                for _, value in result.items():
+                    msg = log_msg % (
+                        self.server_type.name,
+                        url,
+                        value.get("e2e_time_requests", 0.0),
+                        value.get("queue_time_requests", 0.0),
+                        value.get("prefill_time_requests", 0.0),
+                        value.get("mean_time_per_output_token_requests", 0.0),
+                        value.get("time_to_first_token", 0.0)
+                        if self.has_d_instance()
+                        else 0.0,
+                        value.get("proxy_ttft_avg", 0.0)
+                        if self.has_d_instance()
+                        else 0.0,
+                        value.get("proxy_to_instance_time_avg", 0.0),
+                    )
+
+                metrics[url] = msg
+            else:
+                error_msg = (
+                    f"Get metrics for {self.server_type} {url} failed, reason is "
+                    f"({'timeout' if isinstance(result, asyncio.TimeoutError) else result})."
+                )
+                metrics[url] = error_msg
+        return metrics
+
+    def cal_proxy_ttft(
+        self, ttft_recorded_flag: bool, start: float, resp
+    ) -> bool:
+        if ttft_recorded_flag:
+            return True
+
+        if hasattr(resp, "choices") and resp.choices:
+            if resp.choices[0].get("delta"):
+                self.proxy_ttft_count += 1
+                self.proxy_ttft_total += time.perf_counter() - start
+                return True
+
+        if hasattr(resp, "choices") and resp.choices:
+            content = resp.choices[0].get("message", {}).get("content", "")
+            if content:
+                self.proxy_ttft_count += 1
+                self.proxy_ttft_total += time.perf_counter() - start
+                return True
+
+        return False

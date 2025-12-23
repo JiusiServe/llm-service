@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the LM-Service project
 
 import asyncio
+from http.client import HTTPException
 import os
 import time
 from PIL import Image
@@ -13,6 +14,7 @@ import msgspec
 import numpy as np
 import zmq
 import zmq.asyncio
+import aiohttp
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.data import PromptType
@@ -48,8 +50,11 @@ from lm_service.routing_logic import (
     RoundRobinRouter,
     LeastInFlightRouter,
 )
-from lm_service.service_discovery import HealthCheckServiceDiscovery
-from lm_service.stats_loggers import MetricsReporter
+from lm_service.service_discovery import (
+    HealthCheckServiceDiscovery,
+    HTTPHealthCheckServiceDiscovery,
+)
+from lm_service.stats_loggers import MetricsReporter, HTTPMetricsReporter
 import lm_service.envs as lm_service_envs
 from lm_service.metastore_client.factory import (
     MetastoreClientFactory,
@@ -65,7 +70,11 @@ from lm_service.utils import is_addr_ipv6
 
 from lm_service.logger_utils import init_logger
 
-from lm_service.instance_cluster import InstanceCluster, SERVER_PARAMS_MAP
+from lm_service.instance_cluster import (
+    InstanceCluster,
+    HTTPInstanceCluster,
+    SERVER_PARAMS_MAP,
+)
 
 logger = init_logger(__name__)
 
@@ -76,7 +85,157 @@ ROUTER_MAP = {
 }
 
 
-class Proxy(EngineClient):
+class BaseProxy(EngineClient):
+    def __init__(
+        self,
+        vllm_config: Optional[VllmConfig],
+        model_name: str,
+        router: type[RoutingInterface],
+        enable_health_monitor: bool,
+        health_check_interval: float,
+        health_threshold: int,
+        log_stats: bool = True,
+    ):
+        self.vllm_config = vllm_config
+        # Validate input parameters for some components
+        self._check_type("enable_health_monitor", enable_health_monitor, bool)
+        self._check_positive("health_check_interval", health_check_interval)
+        self._check_positive("health_threshold", health_threshold)
+        self._check_subclass("router", router, RoutingInterface)
+
+        self.log_stats = log_stats
+        self.enable_health_monitor = enable_health_monitor
+        self.health_check_interval = health_check_interval
+        self.health_threshold = health_threshold
+        self.router = router
+        self.is_pd_merged = True
+        self.tokenizer = (
+            init_tokenizer_from_configs(model_config=vllm_config.model_config)
+            if vllm_config
+            else None
+        )
+
+        # Dummy: needed for EngineClient Protocol.
+        self.model_config = ModelConfig(
+            model=model_name,
+            tokenizer=model_name,
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="auto",
+            task="generate",
+            seed=42,
+        )
+
+    def _check_type(self, name, value, expected_type):
+        if not isinstance(value, expected_type):
+            raise TypeError(
+                f"{name} must be {expected_type.__name__}, ",
+                f"got {type(value).__name__}",
+            )
+
+    def _check_positive(self, name, value):
+        try:
+            if value <= 0:
+                raise ValueError
+        except Exception:
+            raise ValueError(f"{name} must be a positive number")
+
+    def _check_subclass(self, name, value, base_class):
+        if not isinstance(value, type) or not issubclass(value, base_class):
+            raise TypeError(
+                f"{name} must be a subclass of {base_class.__name__}"
+            )
+
+    def encode(
+        self,
+        prompt: PromptType,
+        pooling_params: PoolingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
+        raise NotImplementedError
+
+    async def abort(self, request_id: str) -> None:
+        raise NotImplementedError
+
+    async def get_vllm_config(self) -> VllmConfig:
+        """Get the vllm configuration of the vLLM engine."""
+        raise NotImplementedError
+
+    async def get_model_config(self) -> ModelConfig:
+        return self.model_config
+
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        raise NotImplementedError
+
+    async def get_tokenizer(self) -> AnyTokenizer:
+        if self.tokenizer is None:
+            raise ValueError(
+                "Tokenizer not initialized. Ensure vllm_config "
+                "is provided when creating the Proxy instance."
+            )
+
+        return self.tokenizer
+
+    def get_check_health_results(self) -> dict[str, dict[str, bool]]:
+        # Return health check results for each server type
+        results: dict[str, dict[str, bool]] = {}
+        for server_type, cluster in self.instance_clusters.items():
+            service_discovery = cluster.service_discovery
+            states = service_discovery.get_instances_states()
+            results[server_type.name] = states
+        return results
+
+    async def is_tracing_enabled(self) -> bool:
+        return False
+
+    async def do_log_stats(self) -> None:
+        pass
+
+    async def start_profile(self) -> None:
+        raise NotImplementedError
+
+    async def stop_profile(self) -> None:
+        raise NotImplementedError
+
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
+        raise NotImplementedError
+
+    async def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError
+
+    async def wake_up(self, tags: list[str] | None = None) -> None:
+        raise NotImplementedError
+
+    async def is_sleeping(self) -> bool:
+        return False
+
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    @property
+    def errored(self) -> bool:
+        return False
+
+    def dead_error(self) -> Exception:
+        return Exception("PDController has failed.")
+
+    def is_running(self) -> bool:
+        return True
+
+    def is_stopped(self) -> bool:
+        return False
+
+    async def reset_mm_cache(self) -> None:
+        raise NotImplementedError
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return ("generate",)
+
+
+class Proxy(BaseProxy):
     """
     Proxy
     """
@@ -98,13 +257,15 @@ class Proxy(EngineClient):
         metastore_client_config: Optional[dict] = None,
         log_stats: bool = True,
     ):
-        self.vllm_config = vllm_config
-        # Validate input parameters for some components
-        self._check_type("enable_health_monitor", enable_health_monitor, bool)
-        self._check_positive("health_check_interval", health_check_interval)
-        self._check_positive("health_threshold", health_threshold)
-        self._check_subclass("router", router, RoutingInterface)
-
+        super().__init__(
+            vllm_config,
+            model_name,
+            router,
+            enable_health_monitor,
+            health_check_interval,
+            health_threshold,
+            log_stats,
+        )
         self.instance_clusters: dict[ServerType, InstanceCluster] = {}
         self.queues: dict[str, asyncio.Queue] = {}
         # This "Encoder" is used for handling message types, not for "Encode - Prefill - Decode"
@@ -113,31 +274,8 @@ class Proxy(EngineClient):
             lm_service_envs.TRANSFER_PROTOCOL or transfer_protocol or "ipc"
         )
         self.ctx = zmq.asyncio.Context()
-
-        self.log_stats = log_stats
-        self.enable_health_monitor = enable_health_monitor
-        self.health_check_interval = health_check_interval
-        self.health_threshold = health_threshold
         self.output_handler: Optional[asyncio.Task] = None
         self.metastore_client: Optional[MetastoreClientBase] = None
-        self.router = router
-        self.is_pd_merged = True
-        self.tokenizer = (
-            init_tokenizer_from_configs(model_config=vllm_config.model_config)
-            if vllm_config
-            else None
-        )
-        # Dummy: needed for EngineClient Protocol.
-        self.model_config = ModelConfig(
-            model=model_name,
-            tokenizer=model_name,
-            tokenizer_mode="auto",
-            trust_remote_code=False,
-            dtype="auto",
-            task="generate",
-            seed=42,
-        )
-
         # Logically, there is no essential difference between PD instances and D instances in handling tokens.
         # Therefore, in internal processing, we treat them as equivalent to simplify the logic.
 
@@ -650,45 +788,6 @@ class Proxy(EngineClient):
             if socket is not None:
                 socket.close(linger=0)
 
-    def encode(
-        self,
-        prompt: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-    ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        raise NotImplementedError
-
-    async def abort(self, request_id: str) -> None:
-        raise NotImplementedError
-
-    async def get_vllm_config(self) -> VllmConfig:
-        """Get the vllm configuration of the vLLM engine."""
-        raise NotImplementedError
-
-    async def get_model_config(self) -> ModelConfig:
-        return self.model_config
-
-    async def get_input_preprocessor(self) -> InputPreprocessor:
-        raise NotImplementedError
-
-    async def get_tokenizer(self) -> AnyTokenizer:
-        if self.tokenizer is None:
-            raise ValueError(
-                "Tokenizer not initialized. Ensure vllm_config "
-                "is provided when creating the Proxy instance."
-            )
-
-        return self.tokenizer
-
-    async def is_tracing_enabled(self) -> bool:
-        return False
-
-    async def do_log_stats(self) -> None:
-        pass
-
     async def check_health(self, server_type: ServerType, addr: str):
         # lazy initialization
         if self.output_handler is None:
@@ -812,46 +911,6 @@ class Proxy(EngineClient):
             else None
         )
 
-    async def start_profile(self) -> None:
-        raise NotImplementedError
-
-    async def stop_profile(self) -> None:
-        raise NotImplementedError
-
-    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
-        raise NotImplementedError
-
-    async def sleep(self, level: int = 1) -> None:
-        raise NotImplementedError
-
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        raise NotImplementedError
-
-    async def is_sleeping(self) -> bool:
-        return False
-
-    async def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError
-
-    @property
-    def errored(self) -> bool:
-        return False
-
-    def dead_error(self) -> Exception:
-        return Exception("PDController has failed.")
-
-    def is_running(self) -> bool:
-        return True
-
-    def is_stopped(self) -> bool:
-        return False
-
-    async def reset_mm_cache(self) -> None:
-        raise NotImplementedError
-
-    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return ("generate",)
-
     async def _get_socket_and_server_types_from_addr(
         self,
         addr: str,
@@ -873,37 +932,324 @@ class Proxy(EngineClient):
         cluster = self.instance_clusters[server_type]
         await cluster.service_discovery.remove_instance(addr)
 
-    def _check_type(self, name, value, expected_type):
-        if not isinstance(value, expected_type):
-            raise TypeError(
-                f"{name} must be {expected_type.__name__}, ",
-                f"got {type(value).__name__}",
+
+class HTTPProxy(BaseProxy):
+    """
+    HTTP Proxy
+    """
+
+    def __init__(
+        self,
+        vllm_config: Optional[VllmConfig] = None,
+        encode_addr_list: Optional[list[str]] = None,
+        pd_addr_list: Optional[list[str]] = None,
+        p_addr_list: Optional[list[str]] = None,
+        d_addr_list: Optional[list[str]] = None,
+        model_name: str = "",
+        router: type[RoutingInterface] = RandomRouter,
+        enable_health_monitor: bool = True,
+        health_check_interval: float = 10.0,
+        health_threshold: int = 3,
+        log_stats: bool = True,
+    ):
+        super().__init__(
+            vllm_config,
+            model_name,
+            router,
+            enable_health_monitor,
+            health_check_interval,
+            health_threshold,
+            log_stats,
+        )
+        self.instance_clusters: dict[ServerType, HTTPInstanceCluster] = {}
+        self._init_cluster_with_addr_list(
+            encode_addr_list,
+            p_addr_list,
+            d_addr_list or pd_addr_list,
+        )
+
+    def _init_cluster_with_addr_list(
+        self,
+        encode_addr_list,
+        p_addr_list,
+        d_addr_list,
+    ):
+        if not encode_addr_list:
+            raise ValueError("encode_addr_list must be provided")
+
+        if not d_addr_list:
+            raise ValueError("d_addr_list or pd_addr_list must be provided")
+
+        self.is_pd_merged = not bool(p_addr_list)
+        init_params = locals()
+        active_server_types = [ServerType.E_INSTANCE] + (
+            [ServerType.PD_INSTANCE]
+            if self.is_pd_merged
+            else [ServerType.P_INSTANCE, ServerType.D_INSTANCE]
+        )
+        for server_type in active_server_types:
+            addr_param_name = str(
+                SERVER_PARAMS_MAP[server_type]["addr_list_name"]
+            )
+            urls = init_params.get(addr_param_name) or []
+            self._initialize_instance_clusters(server_type, urls)
+
+    def _initialize_instance_clusters(
+        self,
+        engine_type: ServerType,
+        urls: list[str],
+    ):
+        service_discovery = HTTPHealthCheckServiceDiscovery(
+            server_type=engine_type,
+            urls=urls,
+            enable_health_monitor=self.enable_health_monitor,
+            health_check_interval=self.health_check_interval,
+            health_threshold=self.health_threshold,
+            health_check_func=self.check_health,
+        )
+        metrics_logger = HTTPMetricsReporter(
+            server_type=engine_type,
+            urls=urls,
+            get_metrics_func=self.fetch_metrics_from_instance,
+        )
+        request_stats_monitor = RequestStatsMonitor(urls)
+        route_policy = f"LM_SERVICE_{engine_type.name}_ROUTER"
+        instance_router = (
+            ROUTER_MAP.get(getattr(lm_service_envs, route_policy), None)
+            or self.router
+        )()
+        timeout = aiohttp.ClientTimeout(total=100_000)
+        keepalive_timeout = int(
+            os.getenv("LM_SERVICE_CLIENT_HTTP_TIMEOUT_KEEP_ALIVE", 0)
+        )
+        connector = aiohttp.TCPConnector(
+            limit=0, force_close=False, keepalive_timeout=keepalive_timeout
+        )
+        self.instance_clusters[engine_type] = HTTPInstanceCluster(
+            server_type=engine_type,
+            urls=urls,
+            service_discovery=service_discovery,
+            stats_monitor=request_stats_monitor,
+            router=instance_router,
+            metrics_logger=metrics_logger,
+            session_timeout=timeout,
+            session_connector=connector,
+        )
+
+    async def generate(self, request_data, request_id):
+        # for each of the multi-modal data, extract them and send to encoder
+        if not request_id:
+            request_id = uuid.uuid4().hex
+        proxy_ttft_start: float = time.perf_counter()
+        ttft_recorded_flag: bool = False
+        mm_items = extract_mm_items(request_data)
+        # Step 1 : Encode the multimodal data
+        if mm_items:
+            await self.encode_mm_data_tasks(
+                mm_items, request_id, request_data.get("model")
             )
 
-    def _check_positive(self, name, value):
+        # Step 2 : Maybe Prefill
+        if not self.is_pd_merged:
+            request_data = await self.prefill_request(request_data, request_id)
+
+        # Step 3 : Decode
+        headers = {"x-request-id": request_id}
+        decode_server_type = (
+            ServerType.PD_INSTANCE
+            if self.is_pd_merged
+            else ServerType.D_INSTANCE
+        )
+        decode_cluster = self.instance_clusters[decode_server_type]
+
+        async with decode_cluster.process_request_streaming_response(
+            json=request_data, headers=headers
+        ) as resp:
+            resp.raise_for_status()
+            yield resp
+            ttft_recorded_flag = decode_cluster.cal_proxy_ttft(
+                ttft_recorded_flag,
+                proxy_ttft_start,
+                resp,
+            )
+
+    async def encode_mm_data_tasks(self, mm_items, request_id, model):
+        tasks = []
+        encode_cluster = self.instance_clusters[ServerType.E_INSTANCE]
+        for idx, item in enumerate(mm_items):
+            child_req_id = f"{request_id}:{idx}:{uuid.uuid4().hex[:6]}"
+            headers = {"x-request-id": child_req_id}
+            encoder_req = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": [item]},
+                ],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            encode_cluster.add_batch_request(encoder_req, headers, tasks)
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Fail fast if any sub-request failed
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error("Encoder request raised: %s", r)
+                raise HTTPException(status_code=502, detail=str(r))
+            if r.status != 200:
+                try:
+                    detail = await r.text()
+                except Exception:
+                    detail = "<unable to read body>"
+                logger.error(
+                    "Encoder request returned %s: %s", r.status, detail
+                )
+                raise HTTPException(
+                    status_code=r.status,
+                    detail=f"Encoder request failed: {detail}",
+                )
+
+    async def prefill_request(self, request_data, request_id):
+        logger.debug(
+            "Processing through prefill for req_id: %s/ url: %s",
+            request_id,
+            request_data.get("url"),
+        )
+        prefill_request = request_data.copy()
+        prefill_request["kv_transfer_params"] = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+        prefill_request["stream"] = False
+        prefill_request["max_tokens"] = 1
+        if "max_completion_tokens" in prefill_request:
+            prefill_request["max_completion_tokens"] = 1
+        if "stream_options" in prefill_request:
+            del prefill_request["stream_options"]
+
+        headers = {"x-request-id": request_id}
+        prefill_cluster = self.instance_clusters[ServerType.P_INSTANCE]
         try:
-            if value <= 0:
-                raise ValueError
-        except Exception:
-            raise ValueError(f"{name} must be a positive number")
-
-    def _check_subclass(self, name, value, base_class):
-        if not isinstance(value, type) or not issubclass(value, base_class):
-            raise TypeError(
-                f"{name} must be a subclass of {base_class.__name__}"
+            resp = await prefill_cluster.run_single_request(
+                json=prefill_request, headers=headers
             )
-
-    def get_check_health_results(self) -> dict[str, dict[str, bool]]:
-        # Return health check results for each server type
-        results: dict[str, dict[str, bool]] = {}
-        for server_type, cluster in self.instance_clusters.items():
-            service_discovery: HealthCheckServiceDiscovery = (
-                cluster.service_discovery
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise HTTPException(
+                    status_code=resp.status,
+                    detail={
+                        "error": "Prefill request failed",
+                        "message": error_text,
+                    },
+                )
+            logger.debug(
+                "Prefill processing completed successfully for req_id: %s",
+                request_id,
             )
-            states = service_discovery.get_instances_states()
-            results[server_type.name] = states
-        return results
+            return resp
+        except Exception as e:
+            logger.error("Prefill processing failed: %s", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Prefill processing error", "message": str(e)},
+            ) from e
 
+    async def fetch_metrics_from_instance(
+        self, server_type: ServerType, url: str
+    ) -> dict[str, dict[str, str]]:
+        """Fetch metrics from an HTTP instance.
+
+        Uses the single endpoint `{url}/metrics`. The returned JSON is
+        expected to be a mapping of engine ids to metric dicts. We augment
+        each engine's metrics with proxy-to-instance timing metrics before
+        returning.
+        """
+        cluster = self.instance_clusters[server_type]
+        session = cluster.session
+        endpoint = f"{url}/metrics"
+        try:
+            async with session.get(endpoint) as resp:
+                resp.raise_for_status()
+                resp_json = await resp.json()
+
+            proxy2instance_avg = cluster.get_avg_proxy_to_instance_time(url)
+            proxy_ttft_avg: float = 0.0
+            if server_type in (ServerType.D_INSTANCE, ServerType.PD_INSTANCE):
+                proxy_ttft_avg = cluster.get_avg_proxy_ttft()
+
+            for engine_id in resp_json:
+                resp_json[engine_id].update(
+                    {
+                        "proxy_to_instance_time_avg": proxy2instance_avg,  # type: ignore
+                        "proxy_ttft_avg": proxy_ttft_avg,  # type: ignore
+                    }
+                )
+
+            return resp_json
+
+        except Exception as e:
+            raise RuntimeError(
+                "Get metrics failed for %s %s, exception: %s"
+                % (server_type, url, e)
+            ) from e
+
+    async def get_overall_health_states(self):
+        overall_health_states = {}
+        for engine_type, cluster in self.instance_clusters.items():
+            resp = await cluster.service_discovery.get_overall_health_states()
+            overall_health_states.update(resp)
+        return overall_health_states
+
+    async def shutdown(self):
+        for cluster in self.instance_clusters.values():
+            await cluster.session.close()
+
+    async def profile(self, cmd: str, payload: dict):
+        encode_task = self.instance_clusters[ServerType.E_INSTANCE].profile_cmd(
+            cmd, payload
+        )
+        prefill_task = (
+            asyncio.sleep(0)
+            if self.is_pd_merged
+            else self.instance_clusters[ServerType.P_INSTANCE].profile_cmd(
+                cmd, payload
+            )
+        )
+        decode_task = self.instance_clusters[
+            ServerType.PD_INSTANCE
+            if self.is_pd_merged
+            else ServerType.D_INSTANCE
+        ].profile_cmd(cmd, payload)
+        encode_res, prefill_res, decode_res = await asyncio.gather(
+            encode_task, prefill_task, decode_task
+        )
+        if encode_res is prefill_res is decode_res is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Profiling endpoints are disabled on all clusters",
+            )
+        return {
+            "encode": encode_res,  # may be None
+            "prefill": prefill_res,  # may be None
+            "decode": decode_res,  # may be None
+        }
+
+    async def check_health(self, server_type, addr):
+        cluster = self.instance_clusters[server_type]
+        session = cluster.session
+        endpoint = f"{addr}/health"
+        try:
+            async with session.get(endpoint) as resp:
+                resp.raise_for_status()
+                return True
+        except Exception as e:
+            logger.error(
+                f"Health check failed for {server_type} {addr}, exception: {e}"
+            )
+            return False
 
 def _has_mm_data(prompt: PromptType) -> bool:
     if isinstance(prompt, dict):
@@ -941,6 +1287,25 @@ def _encode_mm_data(mm_data: dict[str, Any]) -> dict[str, Any]:
     return {"image": encoded_images}
 
 
+def extract_mm_items(request_data: dict) -> list[dict]:
+    """
+    Return *all* image/audio items that appear anywhere in `messages`.
+
+    Each returned dict looks like:
+        { "type": "image_url", "image_url": {...} }
+    """
+    items: list[dict] = []
+    for msg in request_data.get("messages", []):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for item in content:
+            if item.get("type") in {"image_url", "audio_url", "input_audio"}:
+                items.append(item)
+    return items
+
+
 def metrics_enabled(req: GenerationRequest, key: str) -> bool:
     # Check if metrics collection is enabled for a specific key in the request.
 
@@ -960,3 +1325,22 @@ def cal_exec_time(start: float) -> float:
         The elapsed time in seconds as a floating-point number.
     """
     return time.perf_counter() - start
+
+
+def extract_mm_items(request_data: dict) -> list[dict]:
+    """
+    Return *all* image/audio items that appear anywhere in `messages`.
+
+    Each returned dict looks like:
+        { "type": "image_url", "image_url": {...} }
+    """
+    items: list[dict] = []
+    for msg in request_data.get("messages", []):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for item in content:
+            if item.get("type") in {"image_url", "audio_url", "input_audio"}:
+                items.append(item)
+    return items
