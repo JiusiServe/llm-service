@@ -297,6 +297,7 @@ class MetricsReporter:
             "Avg e2e time requests: %.3f ms, "
             "Avg queue time requests: %.3f ms, "
             "Avg prefill time requests: %.3f ms, "
+            "Avg preprocess time requests: %.3f ms, "
             "Avg mean time per output token requests: %.3f ms, "
             "Avg time to first token: %.3f ms, "
             "Avg proxy ttft: %.3f ms, "
@@ -312,6 +313,10 @@ class MetricsReporter:
                         value.get("e2e_time_requests", 0.0),
                         value.get("queue_time_requests", 0.0),
                         value.get("prefill_time_requests", 0.0),
+                        # preprocess time = ttft - queue - prefill
+                        value.get("time_to_first_token", 0.0)
+                        - value.get("queue_time_requests", 0.0)
+                        - value.get("prefill_time_requests", 0.0),
                         value.get("mean_time_per_output_token_requests", 0.0),
                         value.get("time_to_first_token", 0.0)
                         if self.has_d_instance()
