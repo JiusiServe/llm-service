@@ -5,10 +5,21 @@ import asyncio
 import time
 import zmq
 import zmq.asyncio
+import aiohttp
+
 from lm_service.request_stats import RequestStatsMonitor
 from lm_service.routing_logic import RoutingInterface
-from lm_service.service_discovery import HealthCheckServiceDiscovery
-from lm_service.stats_loggers import MetricsReporter
+from lm_service.service_discovery import (
+    BaseServiceDiscovery,
+    HealthCheckServiceDiscovery,
+    HTTPHealthCheckServiceDiscovery,
+)
+from lm_service.logger_utils import init_logger
+from lm_service.stats_loggers import (
+    MetricsReporter,
+    HTTPMetricsReporter,
+    BaseMetricsReporter,
+)
 import msgspec
 import lm_service.envs as lm_service_envs
 from lm_service.protocol.protocol import (
@@ -16,6 +27,8 @@ from lm_service.protocol.protocol import (
     RequestType,
     ServerType,
 )
+
+logger = init_logger(__name__)
 
 SERVER_PARAMS_MAP = {
     ServerType.E_INSTANCE: {
@@ -41,7 +54,61 @@ SERVER_PARAMS_MAP = {
 }
 
 
-class InstanceCluster:
+class BaseInstanceCluster:
+    """
+    Base class for InstanceCluster to define the interface.
+    """
+
+    def __init__(
+        self,
+        server_type: ServerType,
+        service_discovery: BaseServiceDiscovery,
+        stats_monitor: RequestStatsMonitor,
+        router: RoutingInterface,
+        metrics_logger: BaseMetricsReporter,
+    ):
+        self.server_type = server_type
+        self.service_discovery = service_discovery
+        self.stats_monitor = stats_monitor
+        self.router = router
+        self.metrics_logger = metrics_logger
+
+    async def log_metrics(self) -> None:
+        await self.metrics_logger.log_metrics()
+
+    def _get_health_endpoints(self):
+        return self.service_discovery.get_health_endpoints()
+
+    def _route_request(self, health_endpoints, request_stats):
+        return self.router.route_request(health_endpoints, request_stats)
+
+    def lazy_init_health_monitor(self):
+        if self.should_launch_health_monitor():
+            self.launch_health_monitor()
+
+    def should_launch_health_monitor(self):
+        return self.service_discovery.should_launch_health_monitor()
+
+    def launch_health_monitor(self):
+        self.service_discovery.launch_health_monitor()
+
+    def get_unhealthy_endpoints(self):
+        return self.service_discovery.get_unhealth_endpoints()
+
+    def get_avg_proxy_ttft(self):
+        return self.metrics_logger.get_avg_proxy_ttft()
+
+    def get_avg_proxy_to_instance_time(self, addr: str) -> float:
+        return self.metrics_logger.get_avg_proxy_to_instance_time(addr)
+
+    async def process_request_streaming_response(self, request, q):
+        raise NotImplementedError
+
+    async def process_request(self, request, q):
+        raise NotImplementedError
+
+
+class InstanceCluster(BaseInstanceCluster):
     """
     Encapsulates per-server-type runtime components.
     """
@@ -56,12 +123,14 @@ class InstanceCluster:
         metrics_logger: MetricsReporter,
         socket_lock: asyncio.Lock,
     ):
-        self.server_type = server_type
+        super().__init__(
+            server_type,
+            service_discovery,
+            stats_monitor,
+            router,
+            metrics_logger,
+        )
         self.sockets = sockets
-        self.service_discovery = service_discovery
-        self.stats_monitor = stats_monitor
-        self.router = router
-        self.metrics_logger = metrics_logger
         self.encoder = msgspec.msgpack.Encoder()
         self.socket_lock = socket_lock
 
@@ -190,31 +259,6 @@ class InstanceCluster:
                 f"without worker response."
             )
 
-    async def log_metrics(self) -> None:
-        await self.metrics_logger.log_metrics()
-
-    def _get_health_endpoints(self):
-        return self.service_discovery.get_health_endpoints()
-
-    def _route_request(self, health_endpoints, request_stats):
-        return self.router.route_request(health_endpoints, request_stats)
-
-    def lazy_init_health_monitor(self):
-        if self.should_launch_health_monitor():
-            self.launch_health_monitor()
-
-    def should_launch_health_monitor(self):
-        return self.service_discovery.should_launch_health_monitor()
-
-    def launch_health_monitor(self):
-        self.service_discovery.launch_health_monitor()
-
-    def get_unhealthy_endpoints(self):
-        return self.service_discovery.get_unhealth_endpoints()
-
-    def get_avg_proxy_ttft(self):
-        return self.metrics_logger.get_avg_proxy_ttft()
-
     def cal_proxy_ttft(
         self,
         ttft_recorded_flag: bool,
@@ -227,5 +271,87 @@ class InstanceCluster:
             response,
         )
 
-    def get_avg_proxy_to_instance_time(self, addr: str) -> float:
-        return self.metrics_logger.get_avg_proxy_to_instance_time(addr)
+
+class HTTPInstanceCluster(BaseInstanceCluster):
+    """
+    InstanceCluster for HTTP server type.
+    """
+
+    def __init__(
+        self,
+        server_type: ServerType,
+        urls: list[str],
+        service_discovery: HTTPHealthCheckServiceDiscovery,
+        stats_monitor: RequestStatsMonitor,
+        router: RoutingInterface,
+        metrics_logger: HTTPMetricsReporter,
+        session_timeout: aiohttp.ClientTimeout,
+        session_connector: aiohttp.TCPConnector,
+    ):
+        super().__init__(
+            server_type,
+            service_discovery,
+            stats_monitor,
+            router,
+            metrics_logger,
+        )
+        self.urls = urls
+        self.session = aiohttp.ClientSession(
+            timeout=session_timeout, connector=session_connector
+        )
+
+    def add_batch_request(self, json, headers, tasks):
+        tasks.append(asyncio.create_task(self.process_request(json, headers)))
+
+    async def process_request(self, json, headers):
+        health_endpoints = self._get_health_endpoints()
+        request_stats = self.stats_monitor.get_request_stats()
+        url = self._route_request(health_endpoints, request_stats)
+        self.stats_monitor.on_new_request(
+            url, request_id=headers["x-request-id"]
+        )
+        target_url = f"{url}/v1/chat/completions"
+        response = await self.session.post(
+            target_url, json=json, headers=headers
+        )
+        self.stats_monitor.on_request_completed(
+            url, request_id=headers["x-request-id"]
+        )
+        response.raise_for_status()
+        return response
+
+    async def process_request_streaming_response(self, json, headers):
+        async with self.session.post(
+            f"{self.urls[0]}/v1/chat/completions", json=json, headers=headers
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.content.iter_chunked(1024):
+                if chunk:
+                    yield chunk.decode("utf-8", errors="ignore")
+
+    async def _post_if_available(self, url, payload, headers) -> dict | None:
+        try:
+            resp = await self.session.post(url, json=payload, headers=headers)
+            if resp.status == 404:  # profiling disabled on that server
+                logger.warning("Profiling endpoint missing on %s", url)
+                return None
+            resp.raise_for_status()
+            return await resp.json(content_type=None)
+        except aiohttp.ClientResponseError as exc:
+            # Pass 404 through the branch above, re-raise everything else
+            if exc.status == 404:
+                logger.warning("Profiling endpoint missing on %s", url)
+                return None
+            raise
+        except Exception:
+            # Network errors etc.: propagate
+            raise
+
+    async def profile_cmd(self, cmd, payload):
+        headers = {
+            "Authorization": f"Bearer {lm_service_envs.get('OPENAI_API_KEY', '')}"
+        }
+        task = self._post_if_available(
+            f"{self.urls[0]}/{cmd}_profile", payload, headers
+        )
+        return task
