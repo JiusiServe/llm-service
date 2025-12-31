@@ -190,12 +190,16 @@ class _SwitchAdviser:
             self._slo_config.auto_excel_ttft, self._slo_config.pass_ttft
         )
         if self._last_action == self._Action.KEEP_D2P_BY_BAD_TTFT:
-            if state.tpot_quantile < mid_tpot \
-                    and state.ttft_quantile > mid_ttft:
+            if (
+                state.tpot_quantile < mid_tpot
+                and state.ttft_quantile > mid_ttft
+            ):
                 return self._decide_keep_d2p_by_bad_ttft(state)
         elif self._last_action == self._Action.KEEP_P2D_BY_BAD_TPOT:
-            if state.ttft_quantile < mid_ttft \
-                    and state.tpot_quantile > mid_tpot:
+            if (
+                state.ttft_quantile < mid_ttft
+                and state.tpot_quantile > mid_tpot
+            ):
                 return self._decide_keep_p2d_by_bad_tpot(state)
         return self._Action.NO_ACTION
 
@@ -264,7 +268,7 @@ class _ElasticAdviser:
         has_advice = False
         advice = ElasticAdvice(
             new_total_prefills=state.num_prefills,
-            new_total_decodes=state.num_decodes
+            new_total_decodes=state.num_decodes,
         )
         if state.ttft_slot == _SLO_EXCEL_SLOT:
             if state.num_droppable_p > 0:
@@ -276,7 +280,8 @@ class _ElasticAdviser:
                             for e in state.endpoints
                             if e.is_prefill
                         ]
-                    ).tolist()]
+                    ).tolist()
+                ]
 
                 advice.new_total_prefills -= 1
                 has_advice = True
@@ -338,7 +343,7 @@ class DynamicPd:
         self._elastic_adviser = _ElasticAdviser()
 
     def on_request_finished(
-            self, ttft: float, tpot: float, finish_time: float = -1
+        self, ttft: float, tpot: float, finish_time: float = -1
     ):
         if ttft > 0 and tpot > 0:
             self._ttft_hist.append(ttft)
@@ -348,7 +353,7 @@ class DynamicPd:
             )
 
     def advise_switch(
-            self, endpoints: List[PdEndpointInfo]
+        self, endpoints: List[PdEndpointInfo]
     ) -> SwitchAdvice | None:
         state = self._gather_state(endpoints)
         if state is None:
@@ -356,7 +361,7 @@ class DynamicPd:
         return self._switch_adviser.advise(state)
 
     def advise_elastic(
-            self, endpoints: List[PdEndpointInfo]
+        self, endpoints: List[PdEndpointInfo]
     ) -> ElasticAdvice | None:
         state = self._gather_state(endpoints)
         if state is None:
@@ -379,12 +384,12 @@ class DynamicPd:
         ttft_slot = _to_slot(
             ttft_quantile,
             self._slo_config.auto_excel_ttft,
-            self._slo_config.pass_ttft
+            self._slo_config.pass_ttft,
         )
         tpot_slot = _to_slot(
             tpot_quantile,
             self._slo_config.auto_excel_tpot,
-            self._slo_config.pass_tpot
+            self._slo_config.pass_tpot,
         )
 
         switchable_prefills = []
