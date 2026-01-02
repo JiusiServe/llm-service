@@ -93,9 +93,9 @@ class ElasticAdvice:
     # Indices of endpoints to be dropped (as a decode)
     drop_decodes: List[int] | None = None
     # no. of prefill endpoints to be added
-    num_add_prefills: int = 0
+    delta_prefills: int = 0
     # no. of decode endpoints to be added
-    num_add_decodes: int = 0
+    delta_decodes: int = 0
     # new total no. of prefill endpoints
     new_total_prefills: int = -1
     # new total no. of decode endpoints
@@ -303,10 +303,7 @@ class _ElasticAdviser:
     @staticmethod
     def advise(state: _State) -> ElasticAdvice | None:
         has_advice = False
-        advice = ElasticAdvice(
-            new_total_prefills=state.num_prefills,
-            new_total_decodes=state.num_decodes,
-        )
+        advice = ElasticAdvice()
         if state.ttft_slot == _SLO_EXCEL_SLOT:
             if state.num_droppable_p > 0:
                 # TODO find out how many instances to be dropped
@@ -320,12 +317,12 @@ class _ElasticAdviser:
                     ).tolist()
                 ]
 
-                advice.new_total_prefills -= 1
+                advice.delta_prefills = -len(advice.drop_prefills)
                 has_advice = True
         elif state.ttft_slot == _SLO_BAD_SLOT:
-            advice.num_add_prefills = 1
-            advice.new_total_prefills += 1
+            advice.delta_prefills = 1
             has_advice = True
+
         if state.tpot_slot == _SLO_EXCEL_SLOT:
             if state.num_droppable_d > 0:
                 # TODO find out how many instances to be dropped
@@ -338,12 +335,14 @@ class _ElasticAdviser:
                         ]
                     ).tolist()
                 ]
-                advice.new_total_decodes -= 1
+                advice.delta_decodes = -len(advice.drop_decodes)
                 has_advice = True
         elif state.tpot_slot == _SLO_BAD_SLOT:
-            advice.num_add_decodes = 1
-            advice.new_total_decodes += 1
+            advice.delta_decodes = 1
             has_advice = True
+
+        advice.new_total_prefills = state.num_prefills + advice.delta_prefills
+        advice.new_total_decodes = state.num_decodes + advice.delta_decodes
         return advice if has_advice else None
 
 
@@ -408,7 +407,7 @@ class DynamicPd:
         self, endpoints: List[PdEndpointInfo]
     ) -> SwitchAdvice | None:
         """
-        Give switch advice.
+        Give Switch Advice.
 
         Args:
             endpoints (list[PdEndpointInfo]): List of P/D disaggregated endpoints.
@@ -425,13 +424,13 @@ class DynamicPd:
         self, endpoints: List[PdEndpointInfo]
     ) -> ElasticAdvice | None:
         """
-        Give elastic advice.
+        Give Elastic Advice.
 
         Args:
             endpoints (list[PdEndpointInfo]): List of P/D disaggregated endpoints.
 
         Returns:
-            Switch Advice or None if there is no advice.
+            Elastic Advice or None if there is no advice.
         """
         state = self._gather_state(endpoints)
         if state is None:
