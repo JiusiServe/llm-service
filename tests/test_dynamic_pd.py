@@ -224,8 +224,7 @@ class TestDynamicPd:
             == 2 + elastic_advice.delta_prefills
         )
         assert (
-            elastic_advice.new_total_decodes
-            == 2 + elastic_advice.delta_decodes
+            elastic_advice.new_total_decodes == 2 + elastic_advice.delta_decodes
         )
 
     @staticmethod
