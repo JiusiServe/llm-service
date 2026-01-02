@@ -65,8 +65,8 @@ class TestDynamicPd:
             == num_prefills + elastic_advice.delta_prefills
         )
         assert (
-                elastic_advice.new_total_decodes
-                == num_decodes + elastic_advice.delta_decodes
+            elastic_advice.new_total_decodes
+            == num_decodes + elastic_advice.delta_decodes
         )
 
     def test_bad_ttft_good_tpot(self):
